@@ -31,7 +31,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $installer = @(Get-ChildItem .\Windows\out\release\*-setup.exe)
           if ($installer.Count -ne 1) { throw 'Expected one installer.' }
-          & .\Windows\ci\test-installer.ps1 -InstallerPath $installer[0].FullName
+          $env:XMJD_REGISTRATION_TRACE = Join-Path $PWD 'Windows/out/installer-tests/registration-trace.log'
+          try {
+            & .\Windows\ci\test-installer.ps1 -InstallerPath $installer[0].FullName
+          } finally {
+            if (Test-Path -LiteralPath $env:XMJD_REGISTRATION_TRACE) {
+              Get-Content -LiteralPath $env:XMJD_REGISTRATION_TRACE -Encoding Unicode
+            }
+          }
       - name: Collect corresponding third-party sources
         run: |
           $ErrorActionPreference = 'Stop'

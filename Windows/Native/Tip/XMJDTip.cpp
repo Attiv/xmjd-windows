@@ -161,6 +161,21 @@ HRESULT writeTipRegistration() {
     return S_OK;
 }
 
+void traceRegistrationResult(const wchar_t* operation, HRESULT result) noexcept {
+    wchar_t path[32768]{};
+    const DWORD length = GetEnvironmentVariableW(L"XMJD_REGISTRATION_TRACE", path, static_cast<DWORD>(std::size(path)));
+    if (length == 0 || length >= std::size(path)) return;
+    const HANDLE file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    wchar_t message[192]{};
+    const int count = swprintf_s(message, L"%u-bit %s: 0x%08lX\r\n", static_cast<unsigned>(sizeof(void*) * 8),
+                                operation, static_cast<unsigned long>(result));
+    DWORD written = 0;
+    if (count > 0) WriteFile(file, message, static_cast<DWORD>(count * sizeof(wchar_t)), &written, nullptr);
+    CloseHandle(file);
+}
+
 HRESULT removeTipRegistration() {
     RegistrationApartment apartment;
     if (FAILED(apartment.result())) return apartment.result();
@@ -171,6 +186,7 @@ HRESULT removeTipRegistration() {
     if (SUCCEEDED(hr)) {
         for (const GUID& category : kTipCategories) {
             hr = categories->UnregisterCategory(kTipClsid, category, kTipClsid);
+            traceRegistrationResult((L"UnregisterCategory " + guidString(category)).c_str(), hr);
             if (FAILED(hr) && SUCCEEDED(result)) result = hr;
         }
     } else {
@@ -181,6 +197,7 @@ HRESULT removeTipRegistration() {
                           IID_PPV_ARGS(profiles.GetAddressOf()));
     if (SUCCEEDED(hr)) {
         hr = profiles->Unregister(kTipClsid);
+        traceRegistrationResult(L"Profiles.Unregister", hr);
         if (FAILED(hr) && SUCCEEDED(result)) result = hr;
     } else if (SUCCEEDED(result)) {
         result = hr;
