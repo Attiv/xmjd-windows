@@ -429,13 +429,26 @@ Git 归档不包含 .git 历史；归档内容及内嵌第三方目录均原样�
     $provenanceJson = $provenance | ConvertTo-Json -Depth 12
     Write-Utf8 (Join-Path $packageRoot 'PROVENANCE.json') $provenanceJson
     Write-Utf8 (Join-Path $stageRoot $provenanceName) $provenanceJson
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zipPath = Join-Path $stageRoot $archiveName
-    [IO.Compression.ZipFile]::CreateFromDirectory($packageRoot, $zipPath, [IO.Compression.CompressionLevel]::Optimal, $true)
+    $zipStream = [IO.File]::Create($zipPath)
+    $writer = $null
+    try {
+        $writer = [IO.Compression.ZipArchive]::new($zipStream, [IO.Compression.ZipArchiveMode]::Create, $true)
+        foreach ($file in (Get-ChildItem -LiteralPath $packageRoot -Recurse -Force -File | Sort-Object FullName)) {
+            $relative = $file.FullName.Substring($packageRoot.Length + 1).Replace('\', '/')
+            Assert-RelativePath $relative
+            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($writer, $file.FullName,
+                "$baseName/$relative", [IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    } finally {
+        try { if ($writer) { $writer.Dispose() } } finally { $zipStream.Dispose() }
+    }
     $zip = [IO.Compression.ZipFile]::OpenRead($zipPath)
     try {
         if ($zip.Entries.Count -ne $inventory.Count + 1) { throw '生成的 ZIP 文件清单不完整。' }
-        foreach ($entry in $zip.Entries) { Assert-RelativePath ($entry.FullName.Replace('\', '/')) }
+        foreach ($entry in $zip.Entries) { Assert-RelativePath $entry.FullName }
     } finally { $zip.Dispose() }
     Write-Utf8 (Join-Path $stageRoot $hashName) ((Get-Sha256 $zipPath) + "  $archiveName`n" +
         (Get-Sha256 (Join-Path $stageRoot $provenanceName)) + "  $provenanceName`n")

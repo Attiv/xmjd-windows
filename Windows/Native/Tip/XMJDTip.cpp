@@ -161,19 +161,38 @@ HRESULT writeTipRegistration() {
     return S_OK;
 }
 
-void traceRegistrationResult(const wchar_t* operation, HRESULT result) noexcept {
-    wchar_t path[32768]{};
-    const DWORD length = GetEnvironmentVariableW(L"XMJD_REGISTRATION_TRACE", path, static_cast<DWORD>(std::size(path)));
-    if (length == 0 || length >= std::size(path)) return;
-    const HANDLE file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                    nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return;
-    wchar_t message[192]{};
-    const int count = swprintf_s(message, L"%u-bit %s: 0x%08lX\r\n", static_cast<unsigned>(sizeof(void*) * 8),
-                                operation, static_cast<unsigned long>(result));
-    DWORD written = 0;
-    if (count > 0) WriteFile(file, message, static_cast<DWORD>(count * sizeof(wchar_t)), &written, nullptr);
-    CloseHandle(file);
+HRESULT enumeratorContains(IEnumGUID* enumerator, REFGUID expected, bool& present) {
+    present = false;
+    if (!enumerator) return E_UNEXPECTED;
+    GUID value{};
+    ULONG fetched = 0;
+    HRESULT hr = S_OK;
+    while ((hr = enumerator->Next(1, &value, &fetched)) == S_OK) {
+        if (fetched != 1) return E_UNEXPECTED;
+        if (value == expected) {
+            present = true;
+            return S_OK;
+        }
+    }
+    return hr == S_FALSE ? S_OK : (FAILED(hr) ? hr : E_UNEXPECTED);
+}
+
+HRESULT categoryPresent(ITfCategoryMgr* categories, REFGUID category, bool& present) {
+    ComPtr<IEnumGUID> enumerator;
+    const HRESULT hr = categories->EnumCategoriesInItem(kTipClsid, enumerator.GetAddressOf());
+    return FAILED(hr) ? hr : enumeratorContains(enumerator.Get(), category, present);
+}
+
+HRESULT removeCategory(ITfCategoryMgr* categories, REFGUID category) {
+    bool present = false;
+    HRESULT hr = categoryPresent(categories, category, present);
+    if (FAILED(hr) || !present) return hr;
+    const HRESULT removed = categories->UnregisterCategory(kTipClsid, category, kTipClsid);
+    hr = categoryPresent(categories, category, present);
+    if (FAILED(hr)) return hr;
+    // TSF category membership is shared across bitness. A second DLL may find
+    // it already removed; only confirmed absence makes that outcome successful.
+    return !present ? S_OK : (FAILED(removed) ? removed : E_FAIL);
 }
 
 HRESULT removeTipRegistration() {
@@ -185,8 +204,7 @@ HRESULT removeTipRegistration() {
                                   IID_PPV_ARGS(categories.GetAddressOf()));
     if (SUCCEEDED(hr)) {
         for (const GUID& category : kTipCategories) {
-            hr = categories->UnregisterCategory(kTipClsid, category, kTipClsid);
-            traceRegistrationResult((L"UnregisterCategory " + guidString(category)).c_str(), hr);
+            hr = removeCategory(categories.Get(), category);
             if (FAILED(hr) && SUCCEEDED(result)) result = hr;
         }
     } else {
@@ -196,8 +214,17 @@ HRESULT removeTipRegistration() {
     hr = CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr, CLSCTX_INPROC_SERVER,
                           IID_PPV_ARGS(profiles.GetAddressOf()));
     if (SUCCEEDED(hr)) {
-        hr = profiles->Unregister(kTipClsid);
-        traceRegistrationResult(L"Profiles.Unregister", hr);
+        ComPtr<IEnumGUID> enumerator;
+        bool present = false;
+        hr = profiles->EnumInputProcessorInfo(enumerator.GetAddressOf());
+        if (SUCCEEDED(hr)) hr = enumeratorContains(enumerator.Get(), kTipClsid, present);
+        if (SUCCEEDED(hr) && present) {
+            const HRESULT removed = profiles->Unregister(kTipClsid);
+            enumerator.Reset();
+            hr = profiles->EnumInputProcessorInfo(enumerator.GetAddressOf());
+            if (SUCCEEDED(hr)) hr = enumeratorContains(enumerator.Get(), kTipClsid, present);
+            if (SUCCEEDED(hr) && present) hr = FAILED(removed) ? removed : E_FAIL;
+        }
         if (FAILED(hr) && SUCCEEDED(result)) result = hr;
     } else if (SUCCEEDED(result)) {
         result = hr;
