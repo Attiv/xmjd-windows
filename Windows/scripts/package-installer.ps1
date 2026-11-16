@@ -57,14 +57,10 @@ function Test-InnoCompiler([string] $Path) {
     foreach ($name in @('ISCC.exe', 'ISCmplr.dll', 'ISPP.dll', 'ISPPBuiltins.iss', 'Setup.e32', 'SetupLdr.e32', 'Default.isl')) {
         if (-not (Test-Path -LiteralPath (Join-Path $compilerRoot $name) -PathType Leaf)) { Write-Verbose "Missing compiler file: $name"; return $false }
     }
-    foreach ($binary in @($Path, (Join-Path $compilerRoot 'ISCmplr.dll'), (Join-Path $compilerRoot 'ISPP.dll'))) {
-        $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($binary)
-        if ($info.FileMajorPart -ne 6 -or $info.FileMinorPart -ne 5 -or $info.FileBuildPart -ne 4) {
-            Write-Verbose "Compiler version mismatch: $binary ($($info.FileVersion))"
-            return $false
-        }
-    }
-    return $true
+    # Official Inno binaries use FileVersion 0.0.0.0. Their command-line
+    # banner reports the actual compiler version; the bootstrap is hash-pinned.
+    $banner = (& $Path '/?' 2>&1 | Out-String)
+    return $banner -match ('(?m)\b' + [regex]::Escape($innoVersion) + '(?:\s|$)')
 }
 
 $outRoot = Join-Path $windowsRoot 'out'
