@@ -59,8 +59,18 @@ function Test-InnoCompiler([string] $Path) {
     }
     # Official Inno binaries use FileVersion 0.0.0.0. Their command-line
     # banner reports the actual compiler version; the bootstrap is hash-pinned.
-    $banner = (& $Path '/?' 2>&1 | Out-String)
-    return $banner -match ('(?m)\b' + [regex]::Escape($innoVersion) + '(?:\s|$)')
+    $start = [Diagnostics.ProcessStartInfo]::new($Path, '/?')
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $probe = [Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $probe.StandardOutput.ReadToEnd()
+        $stderr = $probe.StandardError.ReadToEnd()
+        $probe.WaitForExit()
+        return ($stdout + "`n" + $stderr) -match ('(?m)\b' + [regex]::Escape($innoVersion) + '(?:\s|$)')
+    } finally { $probe.Dispose() }
 }
 
 $outRoot = Join-Path $windowsRoot 'out'
