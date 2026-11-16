@@ -47,6 +47,11 @@ function Assert-Registration([bool] $Present) {
             $expected = Join-Path $installRoot "Tip/$arch/XMJDTip.dll"
             if ($Present -and $actual -ne $expected) { throw "Incorrect $arch registration: $actual" }
             if (-not $Present -and $null -ne $actual) { throw "$arch registration survived uninstall: $actual" }
+            $tip = $base.OpenSubKey('Software\Microsoft\CTF\TIP\{5F8F59F4-E5A8-4944-960B-8A8AD3BE8857}')
+            try {
+                if ($Present -and -not $tip) { throw "Missing $arch TSF profile registration." }
+                if (-not $Present -and $tip) { throw "$arch TSF metadata survived uninstall." }
+            } finally { if ($tip) { $tip.Dispose() } }
         } finally {
             if ($key) { $key.Dispose() }
             $base.Dispose()

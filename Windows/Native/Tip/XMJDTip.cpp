@@ -187,9 +187,9 @@ HRESULT removeCategory(ITfCategoryMgr* categories, REFGUID category) {
     bool present = false;
     const HRESULT hr = categoryPresent(categories, category, present);
     if (FAILED(hr) || !present) return hr;
-    // An existing category manager can retain its enumeration snapshot after a
-    // successful removal. Verify absence using a fresh manager after all TSF
-    // profile cleanup instead of interpreting that snapshot as a failure.
+    // TSF caches category enumeration within the registrar process, including
+    // newly created managers. Confirm persisted removal after profile cleanup
+    // instead of interpreting an in-process snapshot as a failure.
     return categories->UnregisterCategory(kTipClsid, category, kTipClsid);
 }
 
@@ -227,18 +227,17 @@ HRESULT removeTipRegistration() {
     } else if (SUCCEEDED(result)) {
         result = hr;
     }
-    categories.Reset();
-    hr = CoCreateInstance(CLSID_TF_CategoryMgr, nullptr, CLSCTX_INPROC_SERVER,
-                          IID_PPV_ARGS(categories.GetAddressOf()));
-    if (SUCCEEDED(hr)) {
-        for (const GUID& category : kTipCategories) {
-            bool present = false;
-            hr = categoryPresent(categories.Get(), category, present);
-            if (SUCCEEDED(hr) && present) hr = E_FAIL;
-            if (FAILED(hr) && SUCCEEDED(result)) result = hr;
-        }
-    } else if (SUCCEEDED(result)) {
-        result = hr;
+    // The product's machine TSF registration lives under this shared key.
+    // Registry reads observe persisted state, unlike the per-process category
+    // enumeration cache. Check both views and never mask access/query errors.
+    const std::wstring tipPath = L"Software\\Microsoft\\CTF\\TIP\\" + guidString(kTipClsid);
+    for (DWORD view : {static_cast<DWORD>(KEY_WOW64_64KEY), static_cast<DWORD>(KEY_WOW64_32KEY)}) {
+        HKEY key = nullptr;
+        const LONG opened = RegOpenKeyExW(HKEY_LOCAL_MACHINE, tipPath.c_str(), 0, KEY_READ | view, &key);
+        if (opened == ERROR_SUCCESS) RegCloseKey(key);
+        hr = opened == ERROR_FILE_NOT_FOUND || opened == ERROR_PATH_NOT_FOUND
+            ? S_OK : (opened == ERROR_SUCCESS ? E_FAIL : HRESULT_FROM_WIN32(opened));
+        if (FAILED(hr) && SUCCEEDED(result)) result = hr;
     }
     hr = deleteOwnedTree(L"Software\\Classes\\CLSID", guidString(kTipClsid));
     if (FAILED(hr) && SUCCEEDED(result)) result = hr;
