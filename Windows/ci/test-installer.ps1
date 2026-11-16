@@ -113,7 +113,50 @@ if ($customConfig -notmatch '(?m)^\s+- schema: pinyin_simp\s*$') {
 }
 $settingsShortcut = Join-Path $env:ProgramData 'Microsoft/Windows/Start Menu/Programs/星猫键道/星猫键道设置.lnk'
 if (-not (Test-Path -LiteralPath $settingsShortcut -PathType Leaf)) { throw 'Missing Start Menu settings shortcut.' }
-Write-Output 'PASS: settings app self-check, scheme persistence and Start Menu shortcut.'
+
+# 候选皮肤：默认系统皮肤、切换后在 active.json 中持久化，并能由设置程序重新读回。
+$styleListFile = Join-Path $logRoot 'styles.txt'
+$styleList = Start-Process -FilePath $settingsExe -ArgumentList '--styles' -Wait -PassThru -RedirectStandardOutput $styleListFile
+if ($styleList.ExitCode -ne 0) { throw "Settings style listing failed: $($styleList.ExitCode)" }
+$styleText = [IO.File]::ReadAllText($styleListFile, [Text.Encoding]::UTF8)
+if ($styleText -notmatch 'active=system') { throw '默认候选皮肤不是「系统简约」。' }
+if ($styleText -notmatch 'builtin orbit') { throw '缺少内置「星轨」皮肤。' }
+$stylePick = Start-Process -FilePath $settingsExe -ArgumentList '--select-style orbit' -Wait -PassThru
+if ($stylePick.ExitCode -ne 0) { throw "Settings style selection failed: $($stylePick.ExitCode)" }
+$activeStylePath = Join-Path $settingsRoot 'CandidateStyles/active.json'
+if (-not (Test-Path -LiteralPath $activeStylePath -PathType Leaf)) { throw 'Candidate style was not persisted.' }
+if ((Get-Content -LiteralPath $activeStylePath -Raw) -notmatch '"id":\s*"orbit"') { throw 'active.json does not contain the selected style.' }
+$styleList2 = Start-Process -FilePath $settingsExe -ArgumentList '--styles' -Wait -PassThru -RedirectStandardOutput $styleListFile
+if ($styleList2.ExitCode -ne 0 -or [IO.File]::ReadAllText($styleListFile, [Text.Encoding]::UTF8) -notmatch 'active=orbit') {
+    throw '设置程序无法重新读回已启用的皮肤。'
+}
+Write-Output 'PASS: settings app self-check, candidate style selection and persistence.'
+
+# 方案来源：导入一个含最小 schema 的目录，文件必须落在星猫自己的用户目录，且出现在方案列表。
+$schemeFixture = Join-Path $logRoot 'ci-scheme-source'
+Remove-Item -LiteralPath $schemeFixture -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $schemeFixture | Out-Null
+[IO.File]::WriteAllText((Join-Path $schemeFixture 'ci_test.schema.yaml'),
+    "schema:`n  schema_id: ci_test`n  name: CI 测试方案`n")
+$importScheme = Start-Process -FilePath $settingsExe -ArgumentList ('--import-scheme "' + $schemeFixture + '"') -Wait -PassThru -RedirectStandardOutput (Join-Path $logRoot 'import-scheme.txt')
+if ($importScheme.ExitCode -ne 0) { throw "Settings scheme import failed: $($importScheme.ExitCode)" }
+$importedSchema = Join-Path $settingsRoot 'UserData/Rime/imported/ci-scheme-source/ci_test.schema.yaml'
+if (-not (Test-Path -LiteralPath $importedSchema -PathType Leaf)) { throw '导入的方案没有复制到用户目录。' }
+if (-not (Select-String -LiteralPath (Join-Path $settingsRoot 'settings.ini') -Pattern '^scheme_source=' -Quiet)) {
+    throw '方案来源没有写入设置文件。'
+}
+$schemaListFile = Join-Path $logRoot 'schemas.txt'
+$schemaList = Start-Process -FilePath $settingsExe -ArgumentList '--schemas' -Wait -PassThru -RedirectStandardOutput $schemaListFile
+if ($schemaList.ExitCode -ne 0) { throw "Settings schema listing failed: $($schemaList.ExitCode)" }
+$schemaText = [IO.File]::ReadAllText($schemaListFile, [Text.Encoding]::UTF8)
+if ($schemaText -notmatch 'schema ci_test ') { throw '导入的方案没有出现在方案列表。' }
+if ($schemaText -notmatch '(?m)^schema ci_test .* imported$') { throw '导入方案未标记为用户目录来源。' }
+$settingsCheckAfterImport = Start-Process -FilePath $settingsExe -ArgumentList '--check' -Wait -PassThru
+if ($settingsCheckAfterImport.ExitCode -ne 0) { throw "导入方案后自检失败：$($settingsCheckAfterImport.ExitCode)" }
+$removeSchemes = Start-Process -FilePath $settingsExe -ArgumentList '--remove-schemes' -Wait -PassThru
+if ($removeSchemes.ExitCode -ne 0) { throw "Removing imported schemes failed: $($removeSchemes.ExitCode)" }
+if (Test-Path -LiteralPath (Join-Path $settingsRoot 'UserData/Rime/imported')) { throw '移除导入方案后目录仍然存在。' }
+Write-Output 'PASS: scheme import, listing, self-check and removal.'
 Invoke-CheckedProcess $powerShell ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $installRoot 'scripts/register.ps1') + '" -InstallDirectory "' + $installRoot + '"')
 Assert-Registration $true
 & (Join-Path $PSScriptRoot 'test-host.ps1') -HostPath (Join-Path $installRoot 'XMJDHost.exe')
@@ -191,5 +234,5 @@ Assert-Registration $false
 if (Test-Path -LiteralPath (Join-Path $installRoot 'XMJDHost.exe')) { throw 'Program files survived a clean uninstall.' }
 if (Test-Path -LiteralPath (Join-Path $installRoot 'XMJDSettings.exe')) { throw 'Settings program survived a clean uninstall.' }
 if (Test-Path -LiteralPath $settingsShortcut) { throw 'Settings Start Menu shortcut survived uninstall.' }
-[IO.File]::WriteAllText((Join-Path $logRoot 'result.txt'), "PASS: silent install; x64/x86 COM; Host metadata; settings self-check, dialog self-test and scheme persistence; Start Menu shortcut; repeat install rejected; repeat registration; mismatched ownership blocked uninstall and repair; missing x86 DLL blocked uninstall and retained remaining payload; /REPAIR restored manifest and dual-architecture registration; uninstall; repeat unregister; repair and uninstall preserved user data.`r`n")
+[IO.File]::WriteAllText((Join-Path $logRoot 'result.txt'), "PASS: silent install; x64/x86 COM; Host metadata; settings self-check, dialog self-test and scheme persistence; candidate style selection; scheme import and removal; Start Menu shortcut; repeat install rejected; repeat registration; mismatched ownership blocked uninstall and repair; missing x86 DLL blocked uninstall and retained remaining payload; /REPAIR restored manifest and dual-architecture registration; uninstall; repeat unregister; repair and uninstall preserved user data.`r`n")
 Write-Output 'Installer integration checks passed.'

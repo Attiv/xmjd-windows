@@ -4,9 +4,11 @@
 
 The owner authorized M0-M2 implementation on macOS, then explicitly authorized a
 separate public Windows repository and a directly installable GitHub Release on
-2026-11-16. Version 0.1.3+4 adds the missing first-use surface requested after
+2026-11-16. Version 0.1.3+4 added the missing first-use surface requested after
 testing 0.1.2+3: a native settings program with scheme selection, engine status,
-explicit deployment and diagnostics. It retains the Inno Setup installer, actual
+explicit deployment and diagnostics. Version 0.1.4+5 answers the follow-up request
+for Mac parity in configuration depth: an external Rime scheme source directory
+and a shared candidate-skin format with the Mac build. It retains the Inno Setup installer, actual
 Windows CI, and binary/source release attachments. The repository is
 https://github.com/Attiv/xmjd-windows. Validation evidence and remaining interactive
 acceptance gates are documented in `Windows/README.md`.
@@ -44,8 +46,9 @@ reskin.
 ## Readiness
 
 M0-M2 source/developer delivery was completed at 0.1.1+2. The direct-install
-public delivery round started at 0.1.2+3; 0.1.3+4 adds first-use settings and
-scheme selection. This
+public delivery round started at 0.1.2+3; 0.1.3+4 added first-use settings and
+scheme selection; 0.1.4+5 adds external scheme sources and shared candidate skins.
+This
 includes native input/candidates, Host startup/recovery, resource and dependency
 validation, package manifests, and installation/registration scripts. M0-M2
 runtime acceptance remains open until verified on Windows. Do not repeat a
@@ -440,6 +443,57 @@ Real Windows CI must still verify the new dialog binary, settings persistence,
 scheme-list generation and the pinyin redeploy/commit path, plus the existing
 install/repair/uninstall gates. Desktop TSF typing and DPI/candidate placement
 remain owner acceptance.
+
+## External Scheme Sources and Shared Skins (0.1.4+5)
+
+The owner asked for the Mac configuration surface on Windows: choosing the scheme
+path and picking a skin. Both are implemented without copying Mac-only plumbing.
+
+Scheme source:
+
+- The settings dialog scans `Resources\Rime` plus `%LOCALAPPDATA%\XMJD\UserData\Rime`
+  (recursive, skipping `build`), so imported schemes appear next to bundled ones.
+  User-directory entries shadow bundled entries with the same `schema_id`.
+- Choosing a directory validates that its root contains `.schema.yaml`, rejects the
+  product data directory or its ancestors/descendants, and copies only resource
+  extensions (`yaml`, `lua`, `json`, `ocd`, `ocd2`, `txt`, `tsv`, `gram`, images)
+  into `UserData\Rime\imported\<folder>`, skipping `build`, `*.userdb`,
+  `user.yaml`, `installation.yaml`, `trash` and links. Limits are 20,000 files and
+  512 MiB. The source directory is never modified.
+- The absolute source path is persisted as `scheme_source` in `settings.ini`;
+  `--import-scheme <dir>`, `--schemas` and `--remove-schemes` expose the flow to CI.
+- Removing imports deletes only `UserData\Rime\imported`; if the active scheme came
+  from there the selection falls back to `xmjd6` and `schema_list` is rewritten so
+  the next deploy never references a missing file.
+- `RimeRuntime::validateSchemas` now treats only `xmjd6` and the selected scheme as
+  hard requirements. A third-party scheme that fails to compile is listed in
+  `Logs\schema-skipped.log` instead of taking the whole engine down.
+
+Candidate skins:
+
+- `Native/Common/CandidateStyle.{h,cpp}` implements the same `xmjd.candidate-style`
+  v1 document as `macOS/MacCandidateStyle.swift`, including the optional
+  decoration colours, so skins exported by either platform import on the other.
+  A hand-written, locale-independent JSON reader/writer avoids new dependencies;
+  `Tests/CandidateStyleTests.cpp` round-trips the real `macos-default.json`
+  geometry and colours and checks the layout math.
+- Six built-ins mirror the Mac presets: 系统简约, 星轨, 经典竖排, 紧凑横排, 大字清晰,
+  节庆流光. The active document lives at `CandidateStyles\active.json`; extra
+  `*.json` files become pickable presets. Import/export and a directory shortcut
+  live in the settings dialog.
+- `Native/Tip/CandidateRenderer.{h,cpp}` replaces the fixed system-colour listbox:
+  it scales by monitor DPI, flows horizontal candidates with wrapping, paints
+  rounded gradients, selected-item gradients, label/comment colours and opacity
+  through GDI+ into a 32-bit DIB and presents it with `UpdateLayeredWindow`, and
+  hit-tests clicks against the same layout. Dark/light follows
+  `AppsUseLightTheme`. Because TSF composition is inline, the window never draws a
+  duplicate preedit row; the field is still parsed and serialized for Mac parity.
+- Selecting a skin writes `active.json` immediately, so the next composition uses
+  it without a redeploy.
+
+Outstanding: real desktop verification of the painted popup (placement, DPI,
+click targets), settings-dialog layout at 100%/150% scaling, and a skin edit round
+trip between the two platforms.
 
 ## Public Windows Delivery Evidence (0.1.2+3)
 

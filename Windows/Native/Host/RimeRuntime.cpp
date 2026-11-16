@@ -5,11 +5,13 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <string_view>
 #include <system_error>
+#include <vector>
 #include <objbase.h>
 #include <windows.h>
 
@@ -498,14 +500,32 @@ bool RimeRuntime::validateSchemas(int& errorCode) {
     }
     const RimeSessionId probe = api_->create_session();
     if (!probe) { errorCode = kRuntimeErrorSession; return false; }
+    // Only the bundled scheme and the active selection are hard requirements.
+    // An imported third-party scheme that fails to compile must not make the
+    // whole engine unavailable; it is recorded in Logs\schema-skipped.log.
+    const std::string selected = readSettingsSchema();
     bool valid = true;
+    std::vector<std::string> skipped;
     for (const auto& schema : schemas) {
-        if (!api_->select_schema(probe, schema.first.c_str()) || !sessionHealthy(probe, schema.first.c_str())) {
+        if (api_->select_schema(probe, schema.first.c_str()) && sessionHealthy(probe, schema.first.c_str())) continue;
+        if (schema.first == "xmjd6" || (!selected.empty() && schema.first == selected)) {
             valid = false;
             break;
         }
+        skipped.push_back(schema.first);
     }
     api_->destroy_session(probe);
+    if (!skipped.empty()) {
+        std::error_code logEc;
+        const auto logDirectory = rootDirectory_ / L"Logs";
+        std::filesystem::create_directories(logDirectory, logEc);
+        if (!logEc) {
+            std::ofstream stream(logDirectory / L"schema-skipped.log", std::ios::binary | std::ios::app);
+            if (stream) {
+                for (const auto& id : skipped) stream << id << '\n';
+            }
+        }
+    }
     if (!valid) errorCode = kRuntimeErrorSchema;
     return valid;
 }

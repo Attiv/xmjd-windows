@@ -213,10 +213,18 @@ else()
 endif()
 enable_language(RC)
 add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
-add_library(xmjd_windows_common STATIC Native/Common/Pipe.cpp)
+add_library(xmjd_windows_common STATIC
+  Native/Common/Pipe.cpp
+  Native/Common/CandidateStyle.cpp)
 target_include_directories(xmjd_windows_common PUBLIC
   "${XMJD_ROOT}/Native/Common" "${XMJD_ROOT}/Native/Protocol")
 target_link_libraries(xmjd_windows_common PUBLIC xmjd_protocol advapi32 shell32 uuid)
+if(BUILD_TESTING)
+  add_executable(CandidateStyleTests Tests/CandidateStyleTests.cpp)
+  target_link_libraries(CandidateStyleTests PRIVATE xmjd_windows_common)
+  set_target_properties(CandidateStyleTests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+  add_test(NAME CandidateStyleTests COMMAND CandidateStyleTests)
+endif()
 file(GLOB XMJD_TIP_SOURCES CONFIGURE_DEPENDS "${XMJD_ROOT}/Native/Tip/*.cpp")
 file(GLOB XMJD_TIP_RESOURCES CONFIGURE_DEPENDS "${XMJD_ROOT}/Native/Tip/*.rc")
 file(GLOB XMJD_TIP_DEFINITIONS CONFIGURE_DEPENDS "${XMJD_ROOT}/Native/Tip/*.def")
@@ -238,7 +246,7 @@ add_library(XMJDTip SHARED
 target_include_directories(XMJDTip PRIVATE "${XMJD_GENERATED_DIR}")
 target_link_libraries(XMJDTip PRIVATE
   xmjd_windows_common
-  ole32 oleaut32 uuid advapi32 user32 gdi32 shell32 shlwapi)
+  ole32 oleaut32 uuid advapi32 user32 gdi32 gdiplus shell32 shlwapi)
 set_target_properties(XMJDTip PROPERTIES
   OUTPUT_NAME XMJDTip
   PREFIX ""

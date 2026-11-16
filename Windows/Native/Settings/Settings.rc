@@ -2,28 +2,44 @@
 #include <windows.h>
 #include "resource.h"
 
-IDD_SETTINGS DIALOGEX 0, 0, 352, 262
+IDD_SETTINGS DIALOGEX 0, 0, 352, 436
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "星猫键道设置"
 FONT 9, "Microsoft YaHei UI", 400, 0, 1
 BEGIN
     ICON            1, IDC_APPICON, 14, 12, 20, 20
-    LTEXT           "星猫键道 Windows", IDC_TITLE, 42, 12, 180, 12
-    LTEXT           "", IDC_VERSION, 42, 26, 180, 10
-    LTEXT           "引擎状态：正在检查…", IDC_STATUS, 42, 42, 296, 12
+    LTEXT           "星猫键道 Windows", IDC_TITLE, 42, 12, 240, 12
+    LTEXT           "", IDC_VERSION, 42, 26, 240, 10
+    LTEXT           "引擎状态：正在检查…", IDC_STATUS, 42, 42, 296, 26
 
-    GROUPBOX        "输入方案", -1, 14, 62, 324, 104
-    LISTBOX         IDC_SCHEMA_LIST, 26, 78, 300, 56, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "方案决定输入编码。想先用拼音验证，请选择“袖珍简化字拼音”。", IDC_SCHEMA_HINT, 26, 140, 300, 12
-    LTEXT           "切换后点击“应用并部署”，可能需要一分钟编译词典。", IDC_SCHEMA_HELP, 26, 152, 300, 10
+    GROUPBOX        "输入方案", -1, 14, 74, 324, 100
+    LISTBOX         IDC_SCHEMA_LIST, 26, 90, 300, 52, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "方案决定输入编码。想先用拼音验证，请选择“袖珍简化字拼音”。", IDC_SCHEMA_HINT, 26, 144, 300, 10
+    LTEXT           "切换后点击“应用并部署”，可能需要一分钟编译词典。", IDC_SCHEMA_HELP, 26, 156, 300, 10
 
-    PUSHBUTTON      "应用并部署", IDC_APPLY, 14, 176, 80, 18, BS_DEFPUSHBUTTON
-    PUSHBUTTON      "重新部署", IDC_REDEPLOY, 100, 176, 64, 18
-    PUSHBUTTON      "启动引擎", IDC_START_HOST, 170, 176, 64, 18
-    PUSHBUTTON      "语言设置", IDC_OPEN_LANGUAGE, 240, 176, 64, 18
-    PUSHBUTTON      "关闭", IDCANCEL, 310, 176, 28, 18
+    PUSHBUTTON      "应用并部署", IDC_APPLY, 14, 180, 80, 18, BS_DEFPUSHBUTTON
+    PUSHBUTTON      "重新部署", IDC_REDEPLOY, 100, 180, 64, 18
+    PUSHBUTTON      "启动引擎", IDC_START_HOST, 170, 180, 64, 18
+    PUSHBUTTON      "语言设置", IDC_OPEN_LANGUAGE, 240, 180, 64, 18
+    PUSHBUTTON      "关闭", IDCANCEL, 310, 180, 28, 18
 
-    PUSHBUTTON      "打开用户目录", IDC_OPEN_USER, 14, 200, 80, 18
-    PUSHBUTTON      "打开日志", IDC_OPEN_LOG, 100, 200, 64, 18
-    LTEXT           "添加方法：Windows 设置 → 时间和语言 → 语言和区域 → 中文 → 键盘 → 添加键盘 → XMJD，然后按 Win+Space 切换。", -1, 14, 226, 324, 30
+    GROUPBOX        "方案来源", -1, 14, 206, 324, 74
+    LTEXT           "当前：内置方案", IDC_SOURCE_LABEL, 26, 220, 300, 10
+    PUSHBUTTON      "选择目录…", IDC_CHOOSE_SOURCE, 26, 234, 66, 16
+    PUSHBUTTON      "打开来源", IDC_OPEN_SOURCE, 98, 234, 64, 16
+    PUSHBUTTON      "移除导入方案", IDC_REMOVE_SOURCE, 168, 234, 78, 16
+    LTEXT           "可以指向鼠须管或其他 Rime 方案目录：只读取并复制到星猫自己的用户目录，不改动来源。导入后在方案列表选择并应用。", -1, 26, 253, 300, 22
+
+    GROUPBOX        "候选皮肤", -1, 14, 288, 324, 90
+    LTEXT           "皮肤：", -1, 26, 304, 26, 10
+    COMBOBOX        IDC_STYLE_LIST, 52, 302, 140, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "导入…", IDC_IMPORT_STYLE, 198, 302, 44, 16
+    PUSHBUTTON      "导出…", IDC_EXPORT_STYLE, 246, 302, 40, 16
+    PUSHBUTTON      "目录", IDC_OPEN_STYLES, 290, 302, 36, 16
+    LTEXT           "当前：系统简约", IDC_STYLE_DETAIL, 26, 324, 300, 10
+    LTEXT           "与 Mac 版通用同一份皮肤 JSON（xmjd.candidate-style v1）。选中即生效，下一句输入使用新样式，不需要重新部署。", IDC_STYLE_HINT, 26, 338, 300, 32
+
+    PUSHBUTTON      "打开用户目录", IDC_OPEN_USER, 14, 386, 80, 18
+    PUSHBUTTON      "打开日志", IDC_OPEN_LOG, 100, 386, 64, 18
+    LTEXT           "添加方法：Windows 设置 → 时间和语言 → 语言和区域 → 中文 → 键盘 → 添加键盘 → XMJD，然后按 Win+Space 切换。", -1, 14, 408, 324, 24
 END

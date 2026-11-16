@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "Tip.h"
+#include "CandidateRenderer.h"
 
 namespace xmjd::tip {
 namespace {
@@ -25,8 +26,6 @@ const CLSID kTipClsid = {0x5f8f59f4, 0xe5a8, 0x4944, {0x96, 0x0b, 0x8a, 0x8a, 0x
 const GUID kProfileGuid = {0xc1fa1c93, 0xe62a, 0x4eda, {0xb2, 0x5a, 0xbc, 0x91, 0xc3, 0x3c, 0xca, 0x69}};
 const GUID kCandidateElementGuid = {0x7f58bce8, 0xd956, 0x4bdb, {0xb8, 0x34, 0x51, 0xdd, 0xc8, 0x5b, 0x46, 0x12}};
 constexpr LANGID kLanguageId = 0x0804;
-constexpr UINT kRowHeight96Dpi = 28;
-constexpr UINT kPopupWidth96Dpi = 360;
 constexpr UINT kMaxPopupRows = 10;
 constexpr UINT kMaskShift = 1u << 0;
 constexpr UINT kMaskLock = 1u << 1;
@@ -781,19 +780,23 @@ bool XMJDTip::positionCandidateWindow(TfEditCookie cookie) {
     HMONITOR monitor = MonitorFromRect(&caret, MONITOR_DEFAULTTONEAREST);
     MONITORINFO info{sizeof(info)};
     if (!monitor || !GetMonitorInfoW(monitor, &info)) return false;
-    const UINT dpi = GetDpiForWindow(candidateWindow_);
-    const int scale = static_cast<int>(dpi == 0 ? 96 : dpi);
-    const int width = MulDiv(kPopupWidth96Dpi, scale, 96);
-    const int rowHeight = MulDiv(kRowHeight96Dpi, scale, 96);
-    const UINT rows = static_cast<UINT>(std::min<std::size_t>(candidateElement_->snapshot().values.size(), kMaxPopupRows));
-    if (rows == 0) return false;
-    const int height = rowHeight * static_cast<int>(rows);
+    const int dpi = static_cast<int>(GetDpiForWindow(candidateWindow_));
+    if (!candidateRenderer_) candidateRenderer_ = std::make_unique<CandidateRenderer>();
+    if (!candidateRenderer_) return false;
+    const CandidateSnapshot& snapshot = element->snapshot();
+    if (!candidateRenderer_->prepare(snapshot.values, snapshot.selected, kMaxPopupRows, dpi == 0 ? 96 : dpi)) {
+        return false;
+    }
+    const xmjd::CandidateLayout& layout = candidateRenderer_->layout();
+    const int width = layout.width;
+    const int height = layout.height;
     LONG x = caret.left;
     LONG y = caret.bottom;
     if (y + height > info.rcWork.bottom) y = caret.top - height;
     x = std::max(info.rcWork.left, std::min(x, info.rcWork.right - width));
     y = std::max(info.rcWork.top, std::min(y, info.rcWork.bottom - height));
-    return SetWindowPos(candidateWindow_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW) != FALSE;
+    if (!SetWindowPos(candidateWindow_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE)) return false;
+    return candidateRenderer_->paint(candidateWindow_, dpi == 0 ? 96 : dpi, x, y);
 }
 
 bool XMJDTip::createCandidateWindow() {
@@ -804,14 +807,14 @@ bool XMJDTip::createCandidateWindow() {
         cls.lpfnWndProc = popupWndProc;
         cls.hInstance = g_module;
         cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        cls.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+        cls.hbrBackground = nullptr;
         cls.lpszClassName = kPopupClassName;
         g_popupClassRegistered = RegisterClassExW(&cls) != 0;
     }
     const bool registered = g_popupClassRegistered;
     ReleaseSRWLockExclusive(&g_popupClassLock);
     if (!registered) return false;
-    candidateWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+    candidateWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED,
                                         kPopupClassName, L"", WS_POPUP,
                                         0, 0, 1, 1, nullptr, nullptr, g_module, this);
     return candidateWindow_ != nullptr;
@@ -1282,39 +1285,20 @@ LRESULT CALLBACK XMJDTip::popupWndProc(HWND window, UINT message, WPARAM wParam,
     if (message == WM_ERASEBKGND) return 1;
     if (message == WM_PAINT) {
         PAINTSTRUCT paint{};
-        HDC dc = BeginPaint(window, &paint);
-        RECT client{};
-        GetClientRect(window, &client);
-        FillRect(dc, &client, GetSysColorBrush(COLOR_WINDOW));
-        if (owner && owner->candidateElement_) {
-            const UINT dpi = GetDpiForWindow(window);
-            const int rowHeight = MulDiv(kRowHeight96Dpi, static_cast<int>(dpi == 0 ? 96 : dpi), 96);
-            SetBkMode(dc, TRANSPARENT);
-            HGDIOBJ oldFont = SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
-            const auto& values = owner->candidateElement_->snapshot().values;
-            for (UINT i = 0; i < values.size() && i < kMaxPopupRows; ++i) {
-                RECT row{0, static_cast<LONG>(i * rowHeight), client.right, static_cast<LONG>((i + 1) * rowHeight)};
-                if (i == owner->candidateElement_->snapshot().selected) {
-                    FillRect(dc, &row, GetSysColorBrush(COLOR_HIGHLIGHT));
-                    SetTextColor(dc, GetSysColor(COLOR_HIGHLIGHTTEXT));
-                } else {
-                    SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
-                }
-                InflateRect(&row, -8, 0);
-                const std::wstring text = formatCandidate(values[i]);
-                DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &row, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-            }
-            SelectObject(dc, oldFont);
-        }
+        BeginPaint(window, &paint);
         EndPaint(window, &paint);
         return 0;
     }
-    if (message == WM_LBUTTONUP && owner && owner->candidateElement_) {
+    if (message == WM_DPICHANGED && owner && owner->candidateRenderer_) {
         const UINT dpi = GetDpiForWindow(window);
-        const int rowHeight = MulDiv(kRowHeight96Dpi, static_cast<int>(dpi == 0 ? 96 : dpi), 96);
-        const UINT row = static_cast<UINT>(std::max(0, GET_Y_LPARAM(lParam)) / std::max(1, rowHeight));
-        if (row < owner->candidateElement_->snapshot().values.size() && row < kMaxPopupRows) {
-            owner->candidateClicked(row, owner->candidateElement_->snapshot().revision);
+        owner->candidateRenderer_->repaint(window, static_cast<int>(dpi == 0 ? 96 : dpi));
+        return 0;
+    }
+    if (message == WM_LBUTTONUP && owner && owner->candidateElement_ && owner->candidateRenderer_) {
+        const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const int index = owner->candidateRenderer_->hitTest(point);
+        if (index >= 0) {
+            owner->candidateClicked(static_cast<UINT>(index), owner->candidateElement_->snapshot().revision);
         }
         return 0;
     }

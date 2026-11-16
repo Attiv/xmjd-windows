@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,6 +18,8 @@
 #include "../Common/Pipe.h"
 
 namespace xmjd::tip {
+
+class CandidateRenderer;
 
 struct CandidateValue {
     std::wstring label;
@@ -186,6 +189,7 @@ private:
     std::wstring acknowledgedRaw_;
     bool engineRetryScheduled_ = false;
     HWND candidateWindow_ = nullptr;
+    std::unique_ptr<CandidateRenderer> candidateRenderer_;
     bool activated_ = false;
     bool foreground_ = false;
     bool resettingContext_ = false;

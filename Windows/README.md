@@ -1,6 +1,6 @@
 # 星猫键道 Windows 原生版
 
-星猫键道独立 Windows 版本，当前版本 **0.1.3+4**。采用原生 C++17 TSF 前端，提供 x64/x86 输入法 DLL，由一个 x64 Host 运行 librime。无需安装 Weasel，也不读取或修改 Weasel 的用户目录。
+星猫键道独立 Windows 版本，当前版本 **0.1.4+5**。采用原生 C++17 TSF 前端，提供 x64/x86 输入法 DLL，由一个 x64 Host 运行 librime。无需安装 Weasel，也不读取或修改 Weasel 的用户目录。
 
 ## 下载并安装
 
@@ -8,20 +8,20 @@
 
 安装包直接下载（无需登录）：
 
-<https://github.com/Attiv/xmjd-windows/releases/download/v0.1.3%2B4/XMJD-0.1.3%2B4-windows-x64-setup.exe>
+<https://github.com/Attiv/xmjd-windows/releases/download/v0.1.4%2B5/XMJD-0.1.4%2B5-windows-x64-setup.exe>
 
-SHA-256：`b8237d1110217bdaf30f2e4e8bb2b8e5b0bd5691d68249f9b77d9f9e8ac8d33b`
+SHA-256：`PLACEHOLDER_SHA256`
 
-1. 下载 `XMJD-0.1.3+4-windows-x64-setup.exe`。支持 Windows 11 x64；不支持 ARM64。
+1. 下载 `XMJD-0.1.4+5-windows-x64-setup.exe`。支持 Windows 11 x64；不支持 ARM64。
 2. 运行安装程序并允许管理员安装。程序自动安装并注册 x64/x86 输入法，无需安装开发工具或执行构建命令。
 3. 安装结束后会以普通用户身份打开**星猫键道设置**。如果窗口没有出现，从开始菜单打开“星猫键道 → 星猫键道设置”。
-4. 在设置里选择输入方案，点击**应用并部署**，等待词典编译完成。
+4. 在设置里选择输入方案，点击**应用并部署**，等待词典编译完成；需要外部方案或换皮肤，见下面两节。
 5. 返回普通桌面会话，在中文语言的键盘选项中添加或选择 **XMJD**，再用 **Win+Space** 切换。安装程序不修改默认输入法。
 6. 首次使用要部署方案和词典，请等待初始化。必要时注销后重新登录，再切换到 XMJD。
 
 安装程序目前没有商业代码签名证书。请从本仓库 Release 下载，并按附件中的 `SHA256SUMS.txt` 核对。Windows 可能显示未知发布者提示。
 
-程序目录：`%ProgramFiles%\XMJD\0.1.3+4`。用户数据独立保存在 `%LOCALAPPDATA%\XMJD`，包括 `SharedData`、`UserData`、`Staging`、`Backups`、`Logs`。正常运行使用普通用户权限；Host 拒绝管理员、受限和 AppContainer 会话。
+程序目录：`%ProgramFiles%\XMJD\0.1.4+5`。用户数据独立保存在 `%LOCALAPPDATA%\XMJD`，包括 `SharedData`、`UserData`、`Staging`、`Backups`、`Logs`。正常运行使用普通用户权限；Host 拒绝管理员、受限和 AppContainer 会话。
 
 ## 设置与方案选择
 
@@ -35,7 +35,30 @@ SHA-256：`b8237d1110217bdaf30f2e4e8bb2b8e5b0bd5691d68249f9b77d9f9e8ac8d33b`
 
 运行中的输入法也可以用 **F4** 或 **Ctrl+grave** 呼出方案选单；切换后会在会话销毁时写回 `settings.ini`，新字段继续使用该方案。若刚切换方案，请切换一次窗口或重新输入，让输入法建立新会话。
 
-设置程序必须以普通用户身份运行。管理员窗口只能修改配置文件，不能启动引擎。方案列表来自程序目录 `Resources\Rime\*.schema.yaml`，标记“勿选”的辅助方案不会显示。
+设置程序必须以普通用户身份运行。管理员窗口只能修改配置文件，不能启动引擎。方案列表来自程序目录 `Resources\Rime\*.schema.yaml` 和用户目录 `%LOCALAPPDATA%\XMJD\UserData\Rime`，标记“勿选”的辅助方案不会显示。
+
+## 方案来源（外部 Rime 方案目录）
+
+设置里的**方案来源**可以把已有的 Rime 方案目录（例如鼠须管目录、别人分享的方案包）接进星猫：
+
+1. 点**选择目录…**，选中根层直接包含 `.schema.yaml` 的目录。
+2. 星猫只读取并复制到自己的用户目录 `%LOCALAPPDATA%\XMJD\UserData\Rime\imported\<目录名>\`，不改动来源目录，也不写入它的 build。
+3. 复制时跳过 `build`、`*.userdb`、`user.yaml`、`installation.yaml`、`trash` 等运行时文件；只接受方案、词典、Lua、OpenCC 和图片等资源，上限 20,000 个文件 / 512 MiB。
+4. 回到方案列表选中新方案，点**应用并部署**。部署时会逐方案验证，个别第三方方案编译失败只会在 `Logs\schema-skipped.log` 里记录，不会让整个引擎不可用。
+5. **移除导入方案**会删掉 `imported` 目录，内置方案和用户词库不受影响；如果当前正在用导入的方案，会回退到星猫键道6。
+
+来源路径和导入结果写在 `settings.ini` 的 `scheme_source`；关掉再开设置程序仍然记得。
+
+## 候选皮肤
+
+候选窗按 `xmjd.candidate-style` v1 文档绘制，和 Mac 版**同一份 JSON**，可以直接互相导入导出：
+
+- 内置：系统简约、星轨、经典竖排、紧凑横排、大字清晰、节庆流光。
+- 选中即时生效，下一句输入就用新样式，不需要重新部署。
+- **导入…**读入 Mac 版导出的皮肤；**导出…**把当前皮肤存成 JSON，复制到 Mac 版 `CandidateStyles` 目录即可使用。
+- 皮肤文件放在 `%LOCALAPPDATA%\XMJD\CandidateStyles`，当前生效的是 `active.json`，其余 `*.json` 作为可选预设；**目录**按钮直接打开。
+- 皮肤支持横排/竖排、字号、行高、圆角、内外边距、透明度、最大宽度、编号与注释开关，以及浅色/深色两套配色和选中渐变色。系统深色模式由 `AppsUseLightTheme` 决定。
+- 输入法是内嵌编码（编码显示在应用程序里），所以候选窗不重复画编码行；`showPreedit` 字段仍保留在文档里以兼容 Mac。
 
 ## 卸载与重新安装
 
@@ -44,7 +67,7 @@ SHA-256：`b8237d1110217bdaf30f2e4e8bb2b8e5b0bd5691d68249f9b77d9f9e8ac8d33b`
 普通安装不覆盖已有版本目录，也不提供自动升级。升级前请先卸载旧版本；安装器检测到已有 XMJD 安装或注册时会拒绝继续，卸载会保留用户词库和设置。若 DLL 丢失或注册不完整，请先切换到其他输入法并退出使用它的应用，再用**同版本**安装包修复。在安装包所在目录的 PowerShell 执行：
 
 ```powershell
-& '.\XMJD-0.1.3+4-windows-x64-setup.exe' /REPAIR
+& '.\XMJD-0.1.4+5-windows-x64-setup.exe' /REPAIR
 ```
 
 修复会核对现有安装的版本、固定目录和注册所有权，从安装包恢复程序文件，再重建双架构注册，保留用户数据。路径中有链接、存在未知文件、安装属于其他版本或所有权不匹配时会拒绝修复；文件仍被占用时先注销或重启再试。修复后可以重新使用或正常卸载。手动开发安装仍使用其 `scripts/unregister.ps1` 注销。不要直接删除仍在注册中的 DLL。
@@ -92,7 +115,7 @@ Windows/out/release/                  EXE 安装程序、对应源码及校验�
 单架构构建使用 `-Architecture x64` 或 `x86`；完整交付必须使用默认 `all`。已有同名输出不会覆盖。校验交付支持目录或 ZIP，也可在其他平台的 PowerShell 执行：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\build.ps1 -VerifyPackage ".\Windows\out\package\XMJD-0.1.3+4-windows-x64-x86-Release.zip"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\build.ps1 -VerifyPackage ".\Windows\out\package\XMJD-0.1.4+5-windows-x64-x86-Release.zip"
 ```
 
 开发安装需要管理员的 64 位 PowerShell：
