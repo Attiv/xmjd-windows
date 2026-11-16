@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([Parameter(Mandatory = $true)][string] $InstallerPath)
 
 $ErrorActionPreference = 'Stop'
@@ -19,6 +19,21 @@ $clsid = 'Software\Classes\CLSID\{5F8F59F4-E5A8-4944-960B-8A8AD3BE8857}\InprocSe
 function Invoke-CheckedProcess([string] $File, [string] $Arguments) {
     $process = Start-Process -FilePath $File -ArgumentList $Arguments -Wait -PassThru
     if ($process.ExitCode -ne 0) { throw "Process failed ($($process.ExitCode)): $File" }
+}
+
+function Assert-InstalledPayload([string] $MissingPath = '') {
+    foreach ($entry in $script:installedManifest.files) {
+        $file = Join-Path $script:installRoot $entry.path
+        if ($entry.path -eq $MissingPath) {
+            if (Test-Path -LiteralPath $file) { throw "故障注入的文件意外存在：$MissingPath" }
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or
+            (Get-Item -LiteralPath $file).Length -ne $entry.size -or
+            (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256) {
+            throw "安装文件与 manifest 不一致：$($entry.path)"
+        }
+    }
 }
 
 function Assert-Registration([bool] $Present) {
@@ -69,14 +84,8 @@ $repeat = Start-Process -FilePath $resolvedInstaller -ArgumentList ('/VERYSILENT
 if ($repeat.ExitCode -eq 0) { throw 'Installer unexpectedly accepted an existing version directory.' }
 Assert-Registration $true
 $installedManifest = Get-Content -LiteralPath (Join-Path $installRoot 'manifest.json') -Raw | ConvertFrom-Json
-foreach ($entry in $installedManifest.files) {
-    $file = Join-Path $installRoot $entry.path
-    if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or
-        (Get-Item -LiteralPath $file).Length -ne $entry.size -or
-        (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256) {
-        throw "Installed payload differs from manifest: $($entry.path)"
-    }
-}
+Assert-InstalledPayload
+$manifestHash = (Get-FileHash -LiteralPath (Join-Path $installRoot 'manifest.json') -Algorithm SHA256).Hash
 Invoke-CheckedProcess $powerShell ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $installRoot 'scripts/register.ps1') + '" -InstallDirectory "' + $installRoot + '"')
 Assert-Registration $true
 & (Join-Path $PSScriptRoot 'test-host.ps1') -HostPath (Join-Path $installRoot 'XMJDHost.exe')
@@ -97,20 +106,50 @@ try {
     $metadata.SetValue('HostExecutablePath', (Join-Path $installRoot 'ownership-mismatch.exe'))
     $failedUninstall = Start-Process -FilePath $uninstaller -ArgumentList ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' + (Join-Path $logRoot 'blocked-uninstall.log') + '"') -Wait -PassThru
     if ($failedUninstall.ExitCode -eq 0) { throw 'Uninstaller did not report failed unregistration.' }
-    foreach ($entry in $installedManifest.files) {
-        $file = Join-Path $installRoot $entry.path
-        if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or
-            (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256) {
-            throw "Failed unregistration removed or changed payload: $($entry.path)"
-        }
-    }
+    Assert-InstalledPayload
     if (-not (Test-Path -LiteralPath $uninstaller)) { throw 'Failed uninstall removed its retry entry point.' }
+    # 所有权不匹配时 /REPAIR 也必须在写入和注销前拒绝。
+    $blockedRepair = Start-Process -FilePath $resolvedInstaller -ArgumentList ('/REPAIR /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG="' + (Join-Path $logRoot 'blocked-repair.log') + '"') -Wait -PassThru
+    if ($blockedRepair.ExitCode -eq 0) { throw '修复意外接受了不匹配的 Host 所有权。' }
+    Assert-InstalledPayload
+    if ($metadata.GetValue('HostExecutablePath') -ne (Join-Path $installRoot 'ownership-mismatch.exe')) {
+        throw '被拒绝的修复修改了 Host 所有权。'
+    }
 } finally {
     $metadata.SetValue('HostExecutablePath', (Join-Path $installRoot 'XMJDHost.exe'))
     $metadata.Dispose()
     $base.Dispose()
 }
 Assert-Registration $true
+# 仅删除一次性 runner 的 ProgramFiles 测试安装中的 x86 DLL。
+# 缺失文件应阻止真实卸载；修复必须从安装包恢复，再重建双架构注册。
+$missingPath = 'Tip/x86/XMJDTip.dll'
+$missingFile = Join-Path $installRoot $missingPath
+Remove-Item -LiteralPath $missingFile -Force
+$missingUninstall = Start-Process -FilePath $uninstaller -ArgumentList ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' + (Join-Path $logRoot 'missing-dll-uninstall.log') + '"') -Wait -PassThru
+if ($missingUninstall.ExitCode -eq 0) { throw '缺失 x86 DLL 时卸载未报告失败。' }
+Assert-InstalledPayload $missingPath
+if (-not (Test-Path -LiteralPath $uninstaller) -or
+    -not (Test-Path -LiteralPath (Join-Path $installRoot 'unins000.dat'))) {
+    throw '卸载失败删除了修复需要的 Inno 卸载入口。'
+}
+Assert-Registration $true
+# 模拟本实例的部分注册，确保修复确实先注销；直接 register 会拒绝此状态。
+$base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+$metadata = $base.OpenSubKey('Software\XMJD', $true)
+try { $metadata.DeleteValue('RegistrationComplete', $true) } finally {
+    $metadata.Dispose()
+    $base.Dispose()
+}
+Invoke-CheckedProcess $resolvedInstaller ('/REPAIR /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG="' + (Join-Path $logRoot 'repair.log') + '"')
+Assert-InstalledPayload
+if ((Get-FileHash -LiteralPath (Join-Path $installRoot 'manifest.json') -Algorithm SHA256).Hash -ne $manifestHash) {
+    throw '修复后的 manifest 与安装包不一致。'
+}
+Assert-Registration $true
+if (-not (Test-Path -LiteralPath $sentinel) -or [IO.File]::ReadAllText($sentinel) -ne $sentinelText) {
+    throw '修复未保留用户数据。'
+}
 Invoke-CheckedProcess $uninstaller ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' + (Join-Path $logRoot 'uninstall.log') + '"')
 Assert-Registration $false
 if (-not (Test-Path -LiteralPath $sentinel) -or [IO.File]::ReadAllText($sentinel) -ne $sentinelText) {
@@ -122,5 +161,5 @@ $package = Join-Path $windowsRoot "out/package/XMJD-$version-windows-x64-x86-Rel
 Invoke-CheckedProcess $powerShell ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $package 'scripts/unregister.ps1') + '" -InstallDirectory "' + $package + '"')
 Assert-Registration $false
 if (Test-Path -LiteralPath (Join-Path $installRoot 'XMJDHost.exe')) { throw 'Program files survived a clean uninstall.' }
-[IO.File]::WriteAllText((Join-Path $logRoot 'result.txt'), "PASS: silent install; x64/x86 COM; Host metadata; repeat install rejected; repeat registration; failed unregister retained all payload and retry entry; uninstall; repeat unregister; user data preserved.`r`n")
+[IO.File]::WriteAllText((Join-Path $logRoot 'result.txt'), "PASS: silent install; x64/x86 COM; Host metadata; repeat install rejected; repeat registration; mismatched ownership blocked uninstall and repair; missing x86 DLL blocked uninstall and retained remaining payload; /REPAIR restored manifest and dual-architecture registration; uninstall; repeat unregister; repair and uninstall preserved user data.`r`n")
 Write-Output 'Installer integration checks passed.'
