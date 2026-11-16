@@ -1,5 +1,8 @@
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+#include <olectl.h>
 #include <msctf.h>
 #include <ctfutb.h>
 #include <oleauto.h>
@@ -1475,7 +1478,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     return TRUE;
 }
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void** object) {
+STDAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void** object) {
     using namespace xmjd::tip;
     if (!object) return E_POINTER;
     *object = nullptr;
@@ -1487,7 +1490,7 @@ extern "C" __declspec(dllexport) HRESULT WINAPI DllGetClassObject(REFCLSID clsid
     return hr;
 }
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DllCanUnloadNow() {
+STDAPI DllCanUnloadNow() {
     using namespace xmjd::tip;
     if (g_objectCount.load() != 0 || g_serverLocks.load() != 0) return S_FALSE;
     AcquireSRWLockExclusive(&g_popupClassLock);
@@ -1503,12 +1506,12 @@ extern "C" __declspec(dllexport) HRESULT WINAPI DllCanUnloadNow() {
     return released && g_objectCount.load() == 0 && g_serverLocks.load() == 0 ? S_OK : S_FALSE;
 }
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DllRegisterServer() {
+STDAPI DllRegisterServer() {
     try { return xmjd::tip::writeTipRegistration(); }
     catch (...) { return E_UNEXPECTED; }
 }
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DllUnregisterServer() {
+STDAPI DllUnregisterServer() {
     try { return xmjd::tip::removeTipRegistration(); }
     catch (...) { return E_UNEXPECTED; }
 }
