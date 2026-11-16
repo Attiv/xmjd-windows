@@ -71,6 +71,11 @@ void testRuntime(const std::filesystem::path& hostDirectory, const std::filesyst
             "未加载 Host 输出目录中的真实 rime.dll");
     require(std::filesystem::is_regular_file(root / L"SharedData/Rime/.xmjd-resource-ready"),
             "首次部署未发布资源就绪标记");
+    for (const auto* name : {L"pinyin_simp", L"liangfen", L"xmjd6.gbk"}) {
+        require(std::filesystem::is_regular_file(root / L"UserData/Rime/build" /
+                    (std::wstring(name) + L".table.bin")),
+                "反查依赖词典未编译，检查 default.yaml 预设和 schema 依赖");
+    }
 
     stage = "创建会话及验证默认中文模式";
     const auto session = runtime.createSession();

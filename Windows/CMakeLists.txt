@@ -108,6 +108,11 @@ key_binder:
   bindings:
     - { when: has_menu, accept: semicolon, send: 2 }
     - { when: has_menu, accept: apostrophe, send: 3 }
+recognizer:
+  patterns:
+    email: '^[A-Za-z][-_.0-9A-Za-z]*@.*$'
+    uppercase: '[A-Z][-_+\.0-9A-Za-z]*$'
+    url: '^(www[.]|https?:|ftp:|mailto:).*$'
 punctuator:
   full_shape:
     ' ': { commit: '　' }
