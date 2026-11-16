@@ -788,7 +788,8 @@ std::optional<std::filesystem::path> pickFolder(const std::wstring& title) {
     }
     DWORD options = 0;
     if (FAILED(dialog->GetOptions(&options))) return std::nullopt;
-    dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    dialog->SetOptions(static_cast<FILEOPENDIALOGOPTIONS>(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM |
+                                                          FOS_PATHMUSTEXIST));
     dialog->SetTitle(title.c_str());
     if (dialog->Show(g_dialog) != S_OK) return std::nullopt;
     ComPtr<IShellItem> item;

@@ -1,5 +1,8 @@
 #include "CandidateRenderer.h"
 
+// WIN32_LEAN_AND_MEAN keeps objidl out of windows.h; GDI+ needs IStream and
+// PROPID declarations before gdiplus.h is parsed.
+#include <objidl.h>
 #include <gdiplus.h>
 
 #include <algorithm>
