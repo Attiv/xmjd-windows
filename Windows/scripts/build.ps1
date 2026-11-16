@@ -151,12 +151,23 @@ if ($Architecture -eq 'all' -and ((Test-Path -LiteralPath $packageRoot) -or (Tes
 if ('x64' -in $architectures) {
     & (Join-Path $PSScriptRoot 'prepare-deps.ps1') -Architecture x64 -VerifyOnly:$SkipDependencyPreparation
 }
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw 'Visual Studio Installer/vswhere.exe is required.' }
+$vsVersion = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion
+if ($LASTEXITCODE -ne 0 -or -not $vsVersion) { throw 'No Visual Studio C++ x64/x86 toolchain was found.' }
+$vsMajor = ([version]($vsVersion | Select-Object -First 1)).Major
+$generator = switch ($vsMajor) {
+    17 { 'Visual Studio 17 2022' }
+    18 { 'Visual Studio 18 2026' }
+    default { throw "Unsupported Visual Studio major version: $vsMajor" }
+}
+Write-Output "Using $generator ($vsVersion)."
 $buildDirectories = @{}
 $testEvidence = @()
 foreach ($arch in $architectures) {
     $buildDirectory = Join-Path $windowsRoot "out/build/$arch"
     $cmakeArchitecture = if ($arch -eq 'x64') { 'x64' } else { 'Win32' }
-    $configureArguments = @('-S', $windowsRoot, '-B', $buildDirectory, '-G', 'Visual Studio 17 2022',
+    $configureArguments = @('-S', $windowsRoot, '-B', $buildDirectory, '-G', $generator,
         '-A', $cmakeArchitecture, '-DBUILD_TESTING=ON')
     if ($arch -eq 'x64') { $configureArguments += '-DXMJD_RIME_ROOT=' + (Join-Path $windowsRoot ".deps/librime/$($lock.version)/x64") }
     & $cmake.Source @configureArguments

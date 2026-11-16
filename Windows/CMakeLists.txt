@@ -355,6 +355,19 @@ if(XMJD_ARCH STREQUAL "x64")
             "${XMJD_RIME_ROOT}/xmjd-librime-lock.json" "${XMJD_ROOT}/librime.lock.json"
             "${XMJD_RIME_ROOT}/version-info.txt" "$<TARGET_FILE_DIR:XMJDHost>"
     VERBATIM)
+  if(BUILD_TESTING)
+    add_executable(RimeRuntimeTests
+      Tests/RimeRuntimeTests.cpp
+      Native/Host/RimeRuntime.cpp)
+    target_include_directories(RimeRuntimeTests PRIVATE "${XMJD_RIME_INCLUDE_DIR}" "${XMJD_GENERATED_DIR}")
+    target_link_libraries(RimeRuntimeTests PRIVATE xmjd_windows_common ole32)
+    add_dependencies(RimeRuntimeTests XMJDHost)
+    # 真实运行时会写入当前用户产品目录，仅在 CI 注册，并由测试拒绝已有数据。
+    if("$ENV{GITHUB_ACTIONS}" STREQUAL "true")
+      add_test(NAME RimeRuntimeTests COMMAND RimeRuntimeTests "$<TARGET_FILE_DIR:XMJDHost>")
+      set_tests_properties(RimeRuntimeTests PROPERTIES RUN_SERIAL TRUE TIMEOUT 600 LABELS "integration;librime")
+    endif()
+  endif()
   install(TARGETS XMJDHost RUNTIME DESTINATION .)
   install(FILES ${XMJD_RIME_DLLS}
     "${XMJD_RIME_ROOT}/xmjd-librime-lock.json" "${XMJD_ROOT}/librime.lock.json"
