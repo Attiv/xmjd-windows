@@ -6,7 +6,13 @@
 
 公开仓库：<https://github.com/Attiv/xmjd-windows>。
 
-1. 打开仓库的 **Releases**，下载 `XMJD-0.1.3+4-windows-x64-setup.exe`。支持 Windows 11 x64；不支持 ARM64。
+安装包直接下载（无需登录）：
+
+<https://github.com/Attiv/xmjd-windows/releases/download/v0.1.3%2B4/XMJD-0.1.3%2B4-windows-x64-setup.exe>
+
+SHA-256：`b8237d1110217bdaf30f2e4e8bb2b8e5b0bd5691d68249f9b77d9f9e8ac8d33b`
+
+1. 下载 `XMJD-0.1.3+4-windows-x64-setup.exe`。支持 Windows 11 x64；不支持 ARM64。
 2. 运行安装程序并允许管理员安装。程序自动安装并注册 x64/x86 输入法，无需安装开发工具或执行构建命令。
 3. 安装结束后会以普通用户身份打开**星猫键道设置**。如果窗口没有出现，从开始菜单打开“星猫键道 → 星猫键道设置”。
 4. 在设置里选择输入方案，点击**应用并部署**，等待词典编译完成。

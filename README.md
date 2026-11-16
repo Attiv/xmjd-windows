@@ -1,28 +1,50 @@
 # 星猫键道 Windows 原生版
 
-星猫键道独立 Windows 版本，当前版本 **0.1.2+3**。采用原生 C++17 TSF 前端，提供 x64/x86 输入法 DLL，由一个 x64 Host 运行 librime。无需安装 Weasel，也不读取或修改 Weasel 的用户目录。
+星猫键道独立 Windows 版本，当前版本 **0.1.3+4**。采用原生 C++17 TSF 前端，提供 x64/x86 输入法 DLL，由一个 x64 Host 运行 librime。无需安装 Weasel，也不读取或修改 Weasel 的用户目录。
 
 ## 下载并安装
 
 公开仓库：<https://github.com/Attiv/xmjd-windows>。
 
-1. 打开仓库的 **Releases**，下载 `XMJD-0.1.2+3-windows-x64-setup.exe`。支持 Windows 11 x64；不支持 ARM64。
+安装包直接下载（无需登录）：
+
+<https://github.com/Attiv/xmjd-windows/releases/download/v0.1.3%2B4/XMJD-0.1.3%2B4-windows-x64-setup.exe>
+
+SHA-256：`b8237d1110217bdaf30f2e4e8bb2b8e5b0bd5691d68249f9b77d9f9e8ac8d33b`
+
+1. 下载 `XMJD-0.1.3+4-windows-x64-setup.exe`。支持 Windows 11 x64；不支持 ARM64。
 2. 运行安装程序并允许管理员安装。程序自动安装并注册 x64/x86 输入法，无需安装开发工具或执行构建命令。
-3. 返回普通桌面会话，在中文语言的键盘选项中添加或选择 **XMJD**，再用 **Win+Space** 切换。安装程序不修改默认输入法。
-4. 首次使用要部署方案和词典，请等待初始化。必要时注销后重新登录，再切换到 XMJD。
+3. 安装结束后会以普通用户身份打开**星猫键道设置**。如果窗口没有出现，从开始菜单打开“星猫键道 → 星猫键道设置”。
+4. 在设置里选择输入方案，点击**应用并部署**，等待词典编译完成。
+5. 返回普通桌面会话，在中文语言的键盘选项中添加或选择 **XMJD**，再用 **Win+Space** 切换。安装程序不修改默认输入法。
+6. 首次使用要部署方案和词典，请等待初始化。必要时注销后重新登录，再切换到 XMJD。
 
 安装程序目前没有商业代码签名证书。请从本仓库 Release 下载，并按附件中的 `SHA256SUMS.txt` 核对。Windows 可能显示未知发布者提示。
 
-程序目录：`%ProgramFiles%\XMJD\0.1.2+3`。用户数据独立保存在 `%LOCALAPPDATA%\XMJD`，包括 `SharedData`、`UserData`、`Staging`、`Backups`、`Logs`。正常运行使用普通用户权限；Host 拒绝管理员、受限和 AppContainer 会话。
+程序目录：`%ProgramFiles%\XMJD\0.1.3+4`。用户数据独立保存在 `%LOCALAPPDATA%\XMJD`，包括 `SharedData`、`UserData`、`Staging`、`Backups`、`Logs`。正常运行使用普通用户权限；Host 拒绝管理员、受限和 AppContainer 会话。
+
+## 设置与方案选择
+
+设置程序 `XMJDSettings.exe` 位于程序目录，开始菜单也有入口。它提供：
+
+- **输入方案**：`星猫键道6`（主方案，形码）、`袖珍简化字拼音`、`LiangFen`。切换后会把所选方案放到列表首位，并重建 `%LOCALAPPDATA%\XMJD\UserData\Rime\default.custom.yaml` 的 `schema_list`。
+- **应用并部署**：写入设置并让引擎重新编译词典。首次编译可能需要一分钟；部署期间不要连续按键。
+- **重新部署**：方案文件被修改或词典异常时使用。
+- **启动引擎**：查看/启动普通用户会话中的 `XMJDHost.exe`。
+- **打开用户目录 / 打开日志 / 语言设置**：定位数据、查看诊断日志，或直接打开 Windows 的语言设置页。
+
+运行中的输入法也可以用 **F4** 或 **Ctrl+grave** 呼出方案选单；切换后会在会话销毁时写回 `settings.ini`，新字段继续使用该方案。若刚切换方案，请切换一次窗口或重新输入，让输入法建立新会话。
+
+设置程序必须以普通用户身份运行。管理员窗口只能修改配置文件，不能启动引擎。方案列表来自程序目录 `Resources\Rime\*.schema.yaml`，标记“勿选”的辅助方案不会显示。
 
 ## 卸载与重新安装
 
 先切换到其他输入法，然后从 Windows 设置的“已安装的应用”卸载 XMJD。卸载先注销两种架构，成功后移除程序文件，保留用户数据。注销失败会停止文件删除，保留脚本和卸载入口供重试。已被应用加载的输入法 DLL 可能要重启后才能清除。
 
-普通安装不覆盖已有版本目录，也不提供自动升级。若 DLL 丢失或注册不完整，请先切换到其他输入法并退出使用它的应用，再用**同版本**安装包修复。在安装包所在目录的 PowerShell 执行：
+普通安装不覆盖已有版本目录，也不提供自动升级。升级前请先卸载旧版本；安装器检测到已有 XMJD 安装或注册时会拒绝继续，卸载会保留用户词库和设置。若 DLL 丢失或注册不完整，请先切换到其他输入法并退出使用它的应用，再用**同版本**安装包修复。在安装包所在目录的 PowerShell 执行：
 
 ```powershell
-& '.\XMJD-0.1.2+3-windows-x64-setup.exe' /REPAIR
+& '.\XMJD-0.1.3+4-windows-x64-setup.exe' /REPAIR
 ```
 
 修复会核对现有安装的版本、固定目录和注册所有权，从安装包恢复程序文件，再重建双架构注册，保留用户数据。路径中有链接、存在未知文件、安装属于其他版本或所有权不匹配时会拒绝修复；文件仍被占用时先注销或重启再试。修复后可以重新使用或正常卸载。手动开发安装仍使用其 `scripts/unregister.ps1` 注销。不要直接删除仍在注册中的 DLL。
@@ -41,7 +63,7 @@
 如需诊断，请在**普通** PowerShell 中执行：
 
 ```powershell
-$installDirectory = "$env:ProgramFiles\XMJD\0.1.2+3"
+$installDirectory = "$env:ProgramFiles\XMJD\0.1.3+4"
 & "$installDirectory\XMJDHost.exe" --health
 ```
 
@@ -70,14 +92,14 @@ Windows/out/release/                  EXE 安装程序、对应源码及校验�
 单架构构建使用 `-Architecture x64` 或 `x86`；完整交付必须使用默认 `all`。已有同名输出不会覆盖。校验交付支持目录或 ZIP，也可在其他平台的 PowerShell 执行：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\build.ps1 -VerifyPackage ".\Windows\out\package\XMJD-0.1.2+3-windows-x64-x86-Release.zip"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\build.ps1 -VerifyPackage ".\Windows\out\package\XMJD-0.1.3+4-windows-x64-x86-Release.zip"
 ```
 
 开发安装需要管理员的 64 位 PowerShell：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\install.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\register.ps1 -InstallDirectory "$env:ProgramFiles\XMJD\0.1.2+3"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\register.ps1 -InstallDirectory "$env:ProgramFiles\XMJD\0.1.3+4"
 ```
 
 注册固定使用 HKLM 双位数 COM/TSF 视图。两种 TIP 从 HKLM Registry64 的 `Software\XMJD\HostExecutablePath` 读取 Host；完整注册还包含 `RegistrationComplete` 与带引号的登录启动项。重复完整注册不再执行；失败逆序回滚，包括失败的架构。路径所有权不匹配时拒绝修改。安装器不会启动提权 Host。
