@@ -233,7 +233,7 @@ add_library(XMJDTip SHARED
 target_include_directories(XMJDTip PRIVATE "${XMJD_GENERATED_DIR}")
 target_link_libraries(XMJDTip PRIVATE
   xmjd_windows_common
-  msctf ole32 oleaut32 uuid advapi32 user32 gdi32 shell32 shlwapi)
+  ole32 oleaut32 uuid advapi32 user32 gdi32 shell32 shlwapi)
 set_target_properties(XMJDTip PROPERTIES
   OUTPUT_NAME XMJDTip
   PREFIX ""
@@ -370,7 +370,7 @@ endif()
 
 if(BUILD_TESTING)
   add_executable(XMJDTipComTests Tests/TipComTests.cpp)
-  target_link_libraries(XMJDTipComTests PRIVATE ole32 msctf uuid)
+  target_link_libraries(XMJDTipComTests PRIVATE ole32 uuid)
   add_dependencies(XMJDTipComTests XMJDTip)
   add_test(NAME XMJDTipComTests COMMAND XMJDTipComTests "$<TARGET_FILE:XMJDTip>")
   add_executable(EditorHarness WIN32 Tests/EditorHarness.cpp)
