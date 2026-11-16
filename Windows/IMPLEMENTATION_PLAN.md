@@ -417,9 +417,14 @@ its old toolchain/instructions need current Windows verification.
 - Windows PowerShell 5.1 assembled and verified both the package directory and
   ZIP. COM exports use STDAPI and olectl.h; SDK TSF identifiers link through uuid,
   not a nonexistent msctf.lib. The build detects VS 2022 and VS 2026 generators.
-- Inno Setup installer, actual install/uninstall, ordinary-user Host, and complete
-  corresponding-source attachment checks are CI release gates. Their final
-  results and the Release link are recorded below after completion.
+- The Inno Setup 6.5.4 EXE has built and installed on hosted Windows. An ordinary
+  non-administrator, non-session-zero account has deployed the installed engine,
+  started Host and passed authenticated-pipe health checks.
+- Same-version `/REPAIR` restores damaged program files only after checking fixed
+  path, Inno uninstall ownership, manifest version and absence of reparse points.
+  Failed cleanup retains program files and user data. Missing-DLL recovery,
+  final uninstall and offline corresponding-source expansion are CI release
+  gates; their final result and Release link are recorded after completion.
 - Interactive Windows 11 TSF typing, application/DPI compatibility and measured
   input latency still require owner acceptance. CI does not establish those.
 
