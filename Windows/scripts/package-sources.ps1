@@ -227,7 +227,16 @@ try {
         }
     }
     $licenseRecords = @()
+    $licensesByName = @{}
     foreach ($license in @($lock.licenses) + @($sourceLock.additionalLicenses)) {
+        if ($licensesByName.ContainsKey($license.name)) {
+            $previous = $licensesByName[$license.name]
+            if ($previous.sha256 -ne $license.sha256 -or $previous.url -ne $license.url) {
+                throw "同名许可证的来源或哈希不一致：$($license.name)"
+            }
+            continue
+        }
+        $licensesByName[$license.name] = $license
         $download = Get-VerifiedAsset $license
         Copy-Item -LiteralPath $download -Destination (Join-Path $licensesRoot $license.name)
         $licenseRecords += [ordered]@{ path = "licenses/$($license.name)"; url = $license.url; sha256 = $license.sha256 }
@@ -244,25 +253,93 @@ try {
 [CmdletBinding()]
 param([string] $Destination = (Join-Path $PSScriptRoot 'source'))
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
 $tar = (Get-Command tar -ErrorAction Stop).Source
-if (Test-Path -LiteralPath $Destination) { throw '目标已存在，请使用新的空目录。' }
-$manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'PROVENANCE.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-foreach ($entry in $manifest.files) {
-    $path = Join-Path $PSScriptRoot $entry.path
-    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256) {
-        throw "源码文件校验失败：$($entry.path)"
+
+function Assert-RelativePath([string] $Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path -match '[\\:\x00-\x1f<>"|?*]' -or
+        $Path.StartsWith('/') -or $Path -match '(^|/)(\.|\.\.|)(/|$)') { throw "不安全的相对路径：$Path" }
+    foreach ($part in $Path.Split('/')) {
+        if ($part.EndsWith('.') -or $part.EndsWith(' ') -or
+            $part -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') {
+            throw "不安全的 Windows 路径：$Path"
+        }
     }
 }
-New-Item -ItemType Directory -Path $Destination | Out-Null
+
+function Assert-NoLinkedAncestor([string] $Path) {
+    while ($Path) {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        if ($null -ne $item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "路径不能包含链接：$Path"
+        }
+        $Path = Split-Path -Parent $Path
+    }
+}
+
+$Destination = [IO.Path]::GetFullPath($Destination)
+Assert-NoLinkedAncestor $Destination
+Assert-NoLinkedAncestor $PSScriptRoot
+if (Test-Path -LiteralPath $Destination) { throw '目标已存在，请使用新的空目录。' }
+$manifestPath = Join-Path $PSScriptRoot 'PROVENANCE.json'
+Assert-NoLinkedAncestor $manifestPath
+$manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($manifest.formatVersion -ne 1 -or @($manifest.files).Count -eq 0) { throw '源码清单格式无效。' }
+$verified = @{}
+foreach ($entry in $manifest.files) {
+    Assert-RelativePath $entry.path
+    if ($verified.ContainsKey($entry.path) -or $entry.sha256 -notmatch '^[a-f0-9]{64}$') {
+        throw "源码清单重复或哈希无效：$($entry.path)"
+    }
+    $path = Join-Path $PSScriptRoot $entry.path
+    Assert-NoLinkedAncestor $path
+    $item = Get-Item -LiteralPath $path -Force
+    if ($item.PSIsContainer -or $item.Length -ne $entry.size -or
+        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256) {
+        throw "源码文件校验失败：$($entry.path)"
+    }
+    $verified[$entry.path] = $entry.sha256
+}
+
+$plans = @()
 foreach ($repository in $manifest.repositories) {
-    $target = Join-Path $Destination $repository.path
-    New-Item -ItemType Directory -Path $target -Force | Out-Null
-    & $tar -xf (Join-Path $PSScriptRoot $repository.archive) -C $target
-    if ($LASTEXITCODE -ne 0) { throw "源码解包失败：$($repository.id)" }
+    Assert-RelativePath $repository.path
+    $plans += [pscustomobject]@{ archive = $repository.archive; sha256 = $repository.sha256; target = $repository.path }
 }
 foreach ($asset in $manifest.upstreamArchives) {
-    & $tar -xf (Join-Path $PSScriptRoot $asset.archive) -C $Destination
-    if ($LASTEXITCODE -ne 0) { throw "源码解包失败：$($asset.id)" }
+    $plans += [pscustomobject]@{ archive = $asset.archive; sha256 = $asset.sha256; target = '' }
+}
+if ($plans.Count -eq 0) { throw '源码归档清单为空。' }
+foreach ($plan in $plans) {
+    Assert-RelativePath $plan.archive
+    if (-not $verified.ContainsKey($plan.archive) -or $verified[$plan.archive] -ne $plan.sha256) {
+        throw "源码归档未通过文件清单校验：$($plan.archive)"
+    }
+    $archivePath = Join-Path $PSScriptRoot $plan.archive
+    $names = @(& $tar -tf $archivePath)
+    if ($LASTEXITCODE -ne 0 -or $names.Count -eq 0 -or $names.Count -gt 150000) { throw '无法安全列出源码归档。' }
+    $details = @(& $tar -tvf $archivePath)
+    if ($LASTEXITCODE -ne 0 -or $details.Count -ne $names.Count) { throw '源码归档条目清单不一致。' }
+    $seen = @{}
+    for ($index = 0; $index -lt $names.Count; $index++) {
+        $name = $names[$index].TrimEnd('/')
+        Assert-RelativePath $name
+        if ($seen.ContainsKey($name) -or $details[$index] -notmatch '^[d-][rwxstST-]{9}\s') {
+            throw "源码归档含重复路径、链接或特殊文件：$name"
+        }
+        $seen[$name] = $true
+    }
+}
+
+# 所有归档通过检查后才创建目标；拒绝链接、设备文件与越界路径。
+New-Item -ItemType Directory -Path $Destination | Out-Null
+foreach ($plan in $plans) {
+    $target = $Destination
+    if ($plan.target) { $target = Join-Path $Destination $plan.target }
+    Assert-NoLinkedAncestor $target
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+    & $tar -xf (Join-Path $PSScriptRoot $plan.archive) -C $target
+    if ($LASTEXITCODE -ne 0) { throw "源码解包失败：$($plan.archive)" }
 }
 Write-Output "已校验并解包源码：$Destination"
 '@
@@ -279,7 +356,8 @@ Git 归档不包含 .git 历史；归档内容及内嵌第三方目录均原样�
 
 1. 使用 PowerShell 5.1 或更新版本执行：
    powershell -NoProfile -ExecutionPolicy Bypass -File .\Expand-Sources.ps1
-   该脚本先检查文件哈希，然后使用 Windows tar 解包。只解包，不构建。
+   该脚本先检查文件大小、哈希及全部归档路径，拒绝链接、特殊文件和重复路径，
+   然后使用 Windows tar 解包到新的目录。只解包，不构建。
 
 2. 在 Visual Studio 2022 的 x64 或 x86 Native Tools Command Prompt 中构建。
    需要 MSVC v143、Windows SDK、CMake、Ninja 和 Python（OpenCC 字典生成）。
