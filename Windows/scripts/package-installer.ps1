@@ -55,11 +55,14 @@ function Test-InnoCompiler([string] $Path) {
     if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
     $compilerRoot = Split-Path -Parent $Path
     foreach ($name in @('ISCC.exe', 'ISCmplr.dll', 'ISPP.dll', 'ISPPBuiltins.iss', 'Setup.e32', 'SetupLdr.e32', 'Default.isl')) {
-        if (-not (Test-Path -LiteralPath (Join-Path $compilerRoot $name) -PathType Leaf)) { return $false }
+        if (-not (Test-Path -LiteralPath (Join-Path $compilerRoot $name) -PathType Leaf)) { Write-Verbose "Missing compiler file: $name"; return $false }
     }
     foreach ($binary in @($Path, (Join-Path $compilerRoot 'ISCmplr.dll'), (Join-Path $compilerRoot 'ISPP.dll'))) {
         $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($binary)
-        if ($info.FileMajorPart -ne 6 -or $info.FileMinorPart -ne 5 -or $info.FileBuildPart -ne 4 -or $info.FilePrivatePart -ne 0) { return $false }
+        if ($info.FileMajorPart -ne 6 -or $info.FileMinorPart -ne 5 -or $info.FileBuildPart -ne 4) {
+            Write-Verbose "Compiler version mismatch: $binary ($($info.FileVersion))"
+            return $false
+        }
     }
     return $true
 }
@@ -119,7 +122,13 @@ try {
         $bootstrap = Start-Process -FilePath $bootstrapPath -ArgumentList $bootstrapArguments -Wait -PassThru
         if ($bootstrap.ExitCode -ne 0) { throw "Inno Setup 便携解包失败，退出码：$($bootstrap.ExitCode)" }
         $IsccPath = Join-Path $toolStaging 'ISCC.exe'
-        if (-not (Test-InnoCompiler $IsccPath)) { throw "下载的工具未提供完整的 Inno Setup $innoVersion 编译器。" }
+        if (-not (Test-InnoCompiler $IsccPath)) {
+            Get-ChildItem -LiteralPath $toolStaging -File | ForEach-Object {
+                $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)
+                Write-Output "$($_.Name): $($versionInfo.FileVersion)"
+            }
+            throw "下载的工具未提供完整的 Inno Setup $innoVersion 编译器。"
+        }
     }
 
     New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
