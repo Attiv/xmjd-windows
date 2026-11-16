@@ -374,7 +374,8 @@ if(XMJD_ARCH STREQUAL "x64")
     "${XMJD_RIME_ROOT}/version-info.txt" "${XMJD_ROOT}/VERSION" DESTINATION .)
   install(DIRECTORY "${XMJD_RIME_RESOURCES}" DESTINATION Resources)
   install(DIRECTORY "${XMJD_RIME_ROOT}/licenses" "${XMJD_RIME_ROOT}/share" DESTINATION .)
-  install(FILES "${XMJD_ROOT}/README.md" "${XMJD_ROOT}/IMPLEMENTATION_PLAN.md" DESTINATION .)
+  install(FILES "${XMJD_ROOT}/README.md" "${XMJD_ROOT}/IMPLEMENTATION_PLAN.md"
+    "${XMJD_ROOT}/LICENSE.txt" "${XMJD_ROOT}/THIRD_PARTY_NOTICES.txt" DESTINATION .)
   install(FILES "${XMJD_ROOT}/scripts/build.ps1" "${XMJD_ROOT}/scripts/install.ps1"
     "${XMJD_ROOT}/scripts/register.ps1" "${XMJD_ROOT}/scripts/unregister.ps1" DESTINATION scripts)
 else()

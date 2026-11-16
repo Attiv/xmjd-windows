@@ -34,6 +34,7 @@ OutputDir={#OutputDirectory}
 OutputBaseFilename=XMJD-{#AppVersion}-windows-x64-setup
 SetupIconFile=..\Resources\XMJD.ico
 UninstallDisplayIcon={app}\XMJDHost.exe
+LicenseFile=..\LICENSE.txt
 WizardStyle=modern
 Compression=lzma2
 SolidCompression=yes

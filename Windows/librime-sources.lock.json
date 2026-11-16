@@ -1,0 +1,35 @@
+{
+  "formatVersion": 1,
+  "librimeCommit": "de4700e9f6b75b109910613df907965e3cbe0567",
+  "repositories": [
+    { "id": "librime", "path": "librime", "source": "https://github.com/rime/librime.git", "commit": "de4700e9f6b75b109910613df907965e3cbe0567", "lockKey": "commit" },
+    { "id": "glog", "path": "librime/deps/glog", "parent": "librime", "submodulePath": "deps/glog", "source": "https://github.com/google/glog.git", "commit": "7b134a5c82c0c0b5698bb6bf7a835b230c5638e4", "lockKey": "nativeDependencies.glog.commit" },
+    { "id": "googletest", "path": "librime/deps/googletest", "parent": "librime", "submodulePath": "deps/googletest", "source": "https://github.com/google/googletest.git", "commit": "f8d7d77c06936315286eb55f8de22cd23c188571" },
+    { "id": "leveldb", "path": "librime/deps/leveldb", "parent": "librime", "submodulePath": "deps/leveldb", "source": "https://github.com/google/leveldb.git", "commit": "99b3c03b3284f5886f9ef9a4ef703d57373e61be", "lockKey": "nativeDependencies.leveldb.commit" },
+    { "id": "leveldb-benchmark", "path": "librime/deps/leveldb/third_party/benchmark", "parent": "leveldb", "submodulePath": "third_party/benchmark", "source": "https://github.com/google/benchmark.git", "commit": "bf585a2789e30585b4e3ce6baf11ef2750b54677" },
+    { "id": "leveldb-googletest", "path": "librime/deps/leveldb/third_party/googletest", "parent": "leveldb", "submodulePath": "third_party/googletest", "source": "https://github.com/google/googletest.git", "commit": "c27acebba3b3c7d94209e0467b0a801db4af73ed" },
+    { "id": "marisa-trie", "path": "librime/deps/marisa-trie", "parent": "librime", "submodulePath": "deps/marisa-trie", "source": "https://github.com/s-yata/marisa-trie.git", "commit": "3e87d53b78e15f2f43783d5e376561a8c9722051", "lockKey": "nativeDependencies.marisa-trie.commit" },
+    { "id": "opencc", "path": "librime/deps/opencc", "parent": "librime", "submodulePath": "deps/opencc", "source": "https://github.com/BYVoid/OpenCC.git", "commit": "556ed22496d650bd0b13b6c163be9814637970ae", "lockKey": "nativeDependencies.OpenCC.commit" },
+    { "id": "yaml-cpp", "path": "librime/deps/yaml-cpp", "parent": "librime", "submodulePath": "deps/yaml-cpp", "source": "https://github.com/jbeder/yaml-cpp.git", "commit": "2f86d13775d119edbb69af52e5f566fd65c6953b", "lockKey": "nativeDependencies.yaml-cpp.commit" },
+    { "id": "librime-lua", "path": "librime/plugins/lua", "source": "https://github.com/hchunhui/librime-lua.git", "commit": "68f9c364a2d25a04c7d4794981d7c796b05ab627", "lockKey": "plugins.librime-lua.commit" },
+    { "id": "librime-octagram", "path": "librime/plugins/octagram", "source": "https://github.com/lotem/librime-octagram.git", "commit": "dfcc15115788c828d9dd7b4bff68067d3ce2ffb8", "lockKey": "plugins.librime-octagram.commit" },
+    { "id": "librime-predict", "path": "librime/plugins/predict", "source": "https://github.com/rime/librime-predict.git", "commit": "920bd41ebf6f9bf6855d14fbe80212e54e749791", "lockKey": "plugins.librime-predict.commit" },
+    { "id": "lua-thirdparty", "path": "librime/plugins/lua/thirdparty", "source": "https://github.com/hchunhui/librime-lua.git", "commit": "fa40fadd8af1e5b1fbd55703ccbd54476956d74c", "version": "5.4.8", "evidence": "action-install.bat 下载 thirdparty 分支；这是官方 1.16.1 引擎发布前该分支的最后提交。Lua 5.4.8 除供应方修改的 luaconf.h 和未包含的 lua.c/luac.c 外与官方归档一致；同时单独提供官方完整 Lua 源码。" }
+  ],
+  "archives": [
+    { "id": "Lua", "name": "lua-5.4.8.tar.gz", "version": "5.4.8", "url": "https://www.lua.org/ftp/lua-5.4.8.tar.gz", "sha256": "4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae", "maxBytes": 1048576, "checksumEvidence": "https://www.lua.org/ftp/" },
+    { "id": "Boost", "name": "boost_1_89_0.tar.bz2", "version": "1.89.0", "url": "https://archives.boost.io/release/1.89.0/source/boost_1_89_0.tar.bz2", "sha256": "85a33fa22621b4f314f8e85e1a5e2a9363d22e4f4992925d4bb3bc631b5a0c7a", "maxBytes": 209715200, "checksumEvidence": "https://archives.boost.io/release/1.89.0/source/boost_1_89_0.tar.bz2.json", "commit": "ef7fea34711a189472893b88205b1dd3c275677b" }
+  ],
+  "additionalLicenses": [
+    { "name": "RapidJSON-license.txt", "url": "https://raw.githubusercontent.com/Tencent/rapidjson/f54b0e47a08782a6131cc3d60f94d038fa6e0a51/license.txt", "sha256": "a140e5d46fe734a1c78f1a3c3ef207871dd75648be71fdda8e309b23ab8b1f32", "reason": "OpenCC 内嵌 RapidJSON 1.1.0 头文件，未保留其独立许可文件，需补充上游原文。" },
+    { "name": "TCLAP-COPYING", "url": "https://raw.githubusercontent.com/mirror/tclap/58c5c8ef24111072fc21fb723f8ab45d23395809/COPYING", "sha256": "cd81a61d47aeb1ed63036ca260baee37719923bbd7ebd988ec4edae128f3b6eb", "reason": "OpenCC 内嵌 TCLAP 1.2.5 头文件引用了未保留的 COPYING，需补充上游原文。" }
+  ],
+  "buildEvidence": [
+    "librime/.github/workflows/windows-build.yml：Boost 1.89.0、MSVC、x64/x86，执行 build.bat deps 和 build.bat test",
+    "librime/build.bat：静态依赖库、WITH_GFLAGS=OFF；关闭 LevelDB benchmarks/tests",
+    "librime/plugins/lua/action-install.bat 和 CMakeLists.txt：内嵌 thirdparty/lua5.4、LUA_COMPAT_5_3、LUA_BUILD_AS_DLL",
+    "librime/plugins/octagram/CMakeLists.txt 和源码：使用 librime、Boost 及内嵌 Darts；该提交不依赖 KenLM，也无外部下载",
+    "librime/deps/opencc：完整保留 marisa-0.2.6、darts-clone-0.32、rapidjson-1.1.0、tclap-1.2.5、googletest-1.15.0、google-benchmark 和 pybind11-2.13.1",
+    "librime/include：完整保留 Darts clone、UTF8-CPP、X11 keysym 头文件与声明；yaml-cpp 内含 googletest-1.13.0"
+  ]
+}

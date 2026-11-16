@@ -32,6 +32,30 @@ jobs:
           $installer = @(Get-ChildItem .\Windows\out\release\*-setup.exe)
           if ($installer.Count -ne 1) { throw 'Expected one installer.' }
           & .\Windows\ci\test-installer.ps1 -InstallerPath $installer[0].FullName
+      - name: Collect corresponding third-party sources
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config --global core.longpaths true
+          & .\Windows\scripts\package-sources.ps1
+      - name: Assemble release hashes and project source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseRoot = Join-Path $PWD 'Windows/out/release'
+          git archive --format=zip --output="$releaseRoot/XMJD-0.1.2+3-project-source.zip" HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Project source archive failed.' }
+          $lines = @(Get-ChildItem -LiteralPath $releaseRoot -File | Sort-Object Name | ForEach-Object {
+            (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $_.Name
+          })
+          [IO.File]::WriteAllLines((Join-Path $releaseRoot 'SHA256SUMS.txt'), $lines, [Text.UTF8Encoding]::new($false))
+      - name: Collect engine diagnostic logs
+        if: always()
+        run: |
+          $logs = Join-Path $env:LOCALAPPDATA 'XMJD/Logs'
+          if (Test-Path -LiteralPath $logs) {
+            $destination = 'Windows/out/engine-logs'
+            New-Item -ItemType Directory -Force -Path $destination | Out-Null
+            Copy-Item -Path "$logs/*" -Destination $destination -Recurse -Force
+          }
       - name: Preserve packages and test logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -42,5 +66,6 @@ jobs:
             Windows/out/release/*
             Windows/out/installer-tests/*
             Windows/out/build/**/Testing/Temporary/*.log
+            Windows/out/engine-logs/*
           if-no-files-found: warn
           retention-days: 14

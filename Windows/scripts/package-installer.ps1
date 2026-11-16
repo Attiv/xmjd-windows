@@ -57,8 +57,9 @@ function Test-InnoCompiler([string] $Path) {
     foreach ($name in @('ISCC.exe', 'ISCmplr.dll', 'ISPP.dll', 'ISPPBuiltins.iss', 'Setup.e32', 'SetupLdr.e32', 'Default.isl')) {
         if (-not (Test-Path -LiteralPath (Join-Path $compilerRoot $name) -PathType Leaf)) { Write-Verbose "Missing compiler file: $name"; return $false }
     }
-    # Official Inno binaries use FileVersion 0.0.0.0. Their command-line
-    # banner reports the actual compiler version; the bootstrap is hash-pinned.
+    # Official binaries have FileVersion 0.0.0.0 and /? reports only the major
+    # version. XMJD.iss asserts the exact PREPROCVER during compilation; the
+    # downloaded bootstrap is independently SHA-256 pinned.
     $start = [Diagnostics.ProcessStartInfo]::new($Path, '/?')
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
@@ -69,7 +70,7 @@ function Test-InnoCompiler([string] $Path) {
         $stdout = $probe.StandardOutput.ReadToEnd()
         $stderr = $probe.StandardError.ReadToEnd()
         $probe.WaitForExit()
-        return ($stdout + "`n" + $stderr) -match ('(?m)\b' + [regex]::Escape($innoVersion) + '(?:\s|$)')
+        return ($stdout + "`n" + $stderr) -match '(?m)^Inno Setup 6 Command-Line Compiler\s*$'
     } finally { $probe.Dispose() }
 }
 

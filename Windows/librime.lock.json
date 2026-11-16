@@ -45,7 +45,9 @@
     { "name": "OpenCC-LICENSE", "url": "https://raw.githubusercontent.com/BYVoid/OpenCC/556ed22496d650bd0b13b6c163be9814637970ae/LICENSE", "sha256": "b534e465949558eec2597b04f5092b5e161236a68dfbfd04d547592ac3964308" },
     { "name": "yaml-cpp-LICENSE", "url": "https://raw.githubusercontent.com/jbeder/yaml-cpp/2f86d13775d119edbb69af52e5f566fd65c6953b/LICENSE", "sha256": "aa6fcc27be034e41e21dd832f9175bfe694a48491d9e14ff0fa278e19ad14f1b" },
     { "name": "Lua-lua.h", "url": "https://raw.githubusercontent.com/lua/lua/6e22fedb74cf0c9b6656e9fce8b7331db847c605/lua.h", "sha256": "3b77329f9deed929a5cbe7a7d5fc81ebbb63fd869a49e0a9302fe9240caf1930" },
-    { "name": "Boost-LICENSE_1_0.txt", "url": "https://raw.githubusercontent.com/boostorg/boost/ef7fea34711a189472893b88205b1dd3c275677b/LICENSE_1_0.txt", "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566" }
+    { "name": "Boost-LICENSE_1_0.txt", "url": "https://raw.githubusercontent.com/boostorg/boost/ef7fea34711a189472893b88205b1dd3c275677b/LICENSE_1_0.txt", "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566" },
+    { "name": "RapidJSON-license.txt", "url": "https://raw.githubusercontent.com/Tencent/rapidjson/f54b0e47a08782a6131cc3d60f94d038fa6e0a51/license.txt", "sha256": "a140e5d46fe734a1c78f1a3c3ef207871dd75648be71fdda8e309b23ab8b1f32" },
+    { "name": "TCLAP-COPYING", "url": "https://raw.githubusercontent.com/mirror/tclap/58c5c8ef24111072fc21fb723f8ab45d23395809/COPYING", "sha256": "cd81a61d47aeb1ed63036ca260baee37719923bbd7ebd988ec4edae128f3b6eb" }
   ],
   "architectures": {
     "x64": {

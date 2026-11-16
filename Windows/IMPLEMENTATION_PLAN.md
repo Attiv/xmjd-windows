@@ -2,12 +2,12 @@
 
 ## Delivery Status
 
-The owner authorized M0-M2 implementation on macOS. The Windows tree now contains
-the native TSF TIP, x64 Host, IPC, verified dependency preparation, dual-architecture
-build/package, developer installation, registration/recovery, and test tools.
-This does not authorize a public release or establish Windows compilation,
-registration, or typing success. Current build commands and their validation
-boundary are documented in `Windows/README.md`.
+The owner authorized M0-M2 implementation on macOS, then explicitly authorized a
+separate public Windows repository and a directly installable GitHub Release on
+2026-11-16. Version 0.1.2+3 extends delivery with an Inno Setup installer, actual
+Windows CI, and binary/source release attachments. The repository is
+https://github.com/Attiv/xmjd-windows. Validation evidence and remaining interactive
+acceptance gates are documented in `Windows/README.md`.
 
 ## Goal
 
@@ -28,8 +28,8 @@ reskin.
 - Preserve iOS/macOS behavior, Xcode settings, versions, and existing user edits.
 - Reuse scheme resources without rewriting the input algorithm or Lua modules.
 - Never write into an existing Weasel installation or its user-data directory.
-- Preserve existing Apple behavior and user edits; no public release without
-  separate owner approval.
+- Preserve existing Apple behavior and user edits. The owner separately approved
+  publishing the Windows-only repository and installer; do not export Apple code.
 
 ## Planning Assumptions
 
@@ -41,7 +41,8 @@ reskin.
 
 ## Readiness
 
-M0-M2 source and developer delivery are implemented at version 0.1.1+2. This
+M0-M2 source/developer delivery was completed at 0.1.1+2. The direct-install
+public delivery round uses 0.1.2+3. This
 includes native input/candidates, Host startup/recovery, resource and dependency
 validation, package manifests, and installation/registration scripts. M0-M2
 runtime acceptance remains open until verified on Windows. Do not repeat a
@@ -123,9 +124,8 @@ compatibility are outside the initial target.
 
 The Windows tree includes native protocol/Broker, x64 Host, x64/x86 TSF TIP,
 CMake targets, pinned dependency lock, build/install/register scripts, tests, and
-README. The desktop companion and release-grade installer/package layers remain
-later milestones. Avoid creating empty layers or every filename up front; add
-them when their milestone needs them.
+README. Direct-install packaging is included by the owner's 2026-11-16 release
+request. The desktop companion remains a later milestone.
 
 ```text
 Windows/
@@ -239,8 +239,8 @@ errors:   unavailable, busy, stale, unsupportedVersion, invalidRequest, engineFa
   validates resources, then publishes readiness. Never deploy underneath typing.
 - Import/deploy failures restore original resources and preserve learned data;
   startup recovers unfinished journals before opening Lua or learned databases.
-- M0-M2 delivery is a dual-architecture development ZIP plus explicit scripts;
-  the conventional desktop installer remains M3. Install the complete package
+- Delivery includes a dual-architecture development ZIP and an Inno Setup EXE
+  that invokes checked registration and unregistration scripts. Install the complete package
   under `%ProgramFiles%\XMJD\<version>` with `Tip\x64` and `Tip\x86`, then register
   both HKLM COM/TSF views. Installation, registration and unregistration require
   administrator 64-bit PowerShell; building and actual input use a non-elevated
@@ -356,8 +356,9 @@ installation, manifest generation and ZIP verification. Deliveries are named
 
 Pipeline checkpoints: detect tools -> prepare/verify pinned dependencies -> build
 both TIP architectures -> CTest -> assemble and verify development directory/ZIP
--> explicit administrator install/register -> ordinary-user typing tests. M3
-adds the release-grade installer; the M0-M2 ZIP is not a public release.
+-> Inno Setup EXE -> real administrator install/register/uninstall checks ->
+ordinary-user Host and interactive typing tests. Corresponding third-party source,
+project source and SHA-256 files accompany the public installer.
 Registration checks both architectures and ownership before changes, is a no-op
 for the identical complete installation, and rolls back only this attempt in
 reverse order. Partial cleanup retains ownership metadata for a matching retry.
@@ -384,9 +385,9 @@ ordinary keystrokes, composed text, credentials or captured audio.
    build/runtime gates remain unverified until an actual Windows run; portable
    tests and mocks do not establish Windows IME success.
 4. Keep API/IPC/registration/storage contracts synchronized with code and scripts.
-   The companion and release-grade installer remain later milestones.
+   The companion remains a later milestone; the installer is now authorized.
 5. Return build, install, enable/unregister instructions, actual evidence and
-   open failures. Stop for owner acceptance before M3.
+   open failures. Keep interactive owner acceptance distinct from CI success.
 
 ## Official Research Sources
 

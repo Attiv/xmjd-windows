@@ -64,6 +64,7 @@ function Get-ManifestFiles([object] $Manifest) {
         'Resources/Rime/xmjd6.schema.yaml', 'Resources/Rime/default.yaml', 'Resources/Rime/default.custom.yaml',
         'Resources/Rime/opencc/s2t.json', 'Resources/Rime/opencc/STCharacters.ocd2',
         'share/opencc/s2t.json', 'licenses/librime-LICENSE', 'README.md', 'IMPLEMENTATION_PLAN.md',
+        'LICENSE.txt', 'THIRD_PARTY_NOTICES.txt',
         'scripts/build.ps1', 'scripts/install.ps1', 'scripts/register.ps1', 'scripts/unregister.ps1')) {
         if (-not $expected.ContainsKey($path)) { throw "Incomplete delivery manifest: $path" }
     }

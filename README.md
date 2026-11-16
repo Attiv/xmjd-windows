@@ -1,0 +1,85 @@
+# 星猫键道 Windows 原生版
+
+星猫键道独立 Windows 版本，当前版本 **0.1.2+3**。采用原生 C++17 TSF 前端，提供 x64/x86 输入法 DLL，由一个 x64 Host 运行 librime。无需安装 Weasel，也不读取或修改 Weasel 的用户目录。
+
+## 下载并安装
+
+公开仓库：<https://github.com/Attiv/xmjd-windows>。
+
+1. 打开仓库的 **Releases**，下载 `XMJD-0.1.2+3-windows-x64-setup.exe`。支持 Windows 11 x64；不支持 ARM64。
+2. 运行安装程序并允许管理员安装。程序自动安装并注册 x64/x86 输入法，无需安装开发工具或执行构建命令。
+3. 返回普通桌面会话，在中文语言的键盘选项中添加或选择 **XMJD**，再用 **Win+Space** 切换。安装程序不修改默认输入法。
+4. 首次使用要部署方案和词典，请等待初始化。必要时注销后重新登录，再切换到 XMJD。
+
+安装程序目前没有商业代码签名证书。请从本仓库 Release 下载，并按附件中的 `SHA256SUMS.txt` 核对。Windows 可能显示未知发布者提示。
+
+程序目录：`%ProgramFiles%\XMJD\0.1.2+3`。用户数据独立保存在 `%LOCALAPPDATA%\XMJD`，包括 `SharedData`、`UserData`、`Staging`、`Backups`、`Logs`。正常运行使用普通用户权限；Host 拒绝管理员、受限和 AppContainer 会话。
+
+## 卸载与重新安装
+
+先切换到其他输入法，然后从 Windows 设置的“已安装的应用”卸载 XMJD。卸载先注销两种架构，成功后移除程序文件，保留用户数据。注销失败会停止文件删除，保留脚本和卸载入口供重试。已被应用加载的输入法 DLL 可能要重启后才能清除。
+
+当前版本不覆盖已有版本目录，也不提供自动升级。若安装程序提示旧安装或部分注册仍存在，请先使用旧安装的卸载入口；手动开发安装可运行其 `scripts/unregister.ps1`。不要直接删除仍在注册中的 DLL。
+
+## 首次实机验收
+
+请先在普通用户的记事本中测试，再测试常用编辑器。
+
+- 中文编码、候选与数字/鼠标选词、空格、翻页、Esc、中文标点。
+- 左右 Shift 的中英切换和组合确认；Ctrl+Shift 不应误判为单独 Shift；Caps Lock、Ctrl 快捷键、F4/Ctrl+grave 方案选单。
+- 切换字段、窗口和输入法，确认不会重复上屏或把旧组合写入新字段。
+- 32 位和 64 位应用、不同 DPI/多显示器、Host 首次启动与中断恢复。
+
+公开 CI 的编译、CTest、真实引擎和安装检查可以覆盖自动验证部分；实际 Windows 11 桌面中的 TSF 输入、应用兼容性、候选定位和按键延迟仍需要实机验收。Windows Server runner 的成功不代表所有桌面场景都已通过。
+
+如需诊断，请在**普通** PowerShell 中执行：
+
+```powershell
+$installDirectory = "$env:ProgramFiles\XMJD\0.1.2+3"
+& "$installDirectory\XMJDHost.exe" --health
+```
+
+`--health` 返回 `ok` 表示当前 Host 可用，`unavailable` 表示尚未就绪或没有运行。该命令只查询。没有运行中的 Host 时可执行 `--deploy`，成功输出 `deploy-ok`；不要在管理员窗口运行 Host。部署失败请保留错误码及 Logs/Staging，不要删除词库。
+
+## 从源码构建
+
+普通用户只需要上面的 EXE。开发构建需要 Windows x64、Visual Studio 2022/2026 的 C++ 桌面工具（含 x64/x86 工具及 SDK）、CMake 3.24 或更新版本、7-Zip 和 64 位 PowerShell。VS 2026 还要求 CMake 支持对应生成器。完整 checkout 必须保留 `Windows/` 与 `xmjd/xmjd.zip` 的相对位置。
+
+在仓库根目录执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\build.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\package-installer.ps1
+```
+
+构建脚本检测已安装的 Visual Studio，校验锁定依赖与方案，构建 x64/Win32，分别运行 CTest，合并为带逐文件 SHA-256 清单的交付目录和 ZIP。CI 还运行真实 librime/Lua/OpenCC 候选和上屏测试。任何原生命令失败即停止。安装器使用固定 SHA-256 的 Inno Setup 6.5.4 编译器。
+
+```text
+Windows/out/build/x64/Release/         Host、x64 TIP、测试工具、运行时资源
+Windows/out/build/x86/Release/         x86 TIP、测试工具
+Windows/out/package/                  双架构开发交付及 ZIP
+Windows/out/release/                  EXE 安装程序、对应源码及校验值
+```
+
+单架构构建使用 `-Architecture x64` 或 `x86`；完整交付必须使用默认 `all`。已有同名输出不会覆盖。校验交付支持目录或 ZIP，也可在其他平台的 PowerShell 执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\build.ps1 -VerifyPackage ".\Windows\out\package\XMJD-0.1.2+3-windows-x64-x86-Release.zip"
+```
+
+开发安装需要管理员的 64 位 PowerShell：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\install.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\register.ps1 -InstallDirectory "$env:ProgramFiles\XMJD\0.1.2+3"
+```
+
+注册固定使用 HKLM 双位数 COM/TSF 视图。两种 TIP 从 HKLM Registry64 的 `Software\XMJD\HostExecutablePath` 读取 Host；完整注册还包含 `RegistrationComplete` 与带引号的登录启动项。重复完整注册不再执行；失败逆序回滚，包括失败的架构。路径所有权不匹配时拒绝修改。安装器不会启动提权 Host。
+
+## 架构与依赖
+
+TIP 只处理 TSF 编辑会话和候选 UI，通过同一登录会话的本地管道连接 Host。输入事务共享 50 ms 截止时间；不确定结果会使连接失效，不重放按键，不应用迟到回复。上下文、会话和候选 revision 独立校验，旧组合不转写新字段。候选支持应用接管 UI 和独立非激活窗口。
+
+`librime.lock.json` 固定 librime **1.16.1**、core `de4700e9f6b75b109910613df907965e3cbe0567`、librime-lua `68f9c364a2d25a04c7d4794981d7c796b05ab627`、Lua **5.4.8**、OpenCC **1.1.9** 和工件/许可证哈希。Windows 原生代码按 GPLv3 分发；官方引擎含 GPL-3.0 的 octagram。Release 同时提供第三方对应源码和原始许可证，详见 `THIRD_PARTY_NOTICES.txt`。源码包脚本保留上游构建文件和准确提交来源。
+
+设置伴侣、语音/AI、词库同步、自动更新、ARM64 尚未实现。当前交付目标是可安装的独立输入法和可追踪的 Windows 构建证据。`Windows/VERSION` 是 Windows 的唯一版本输入；Apple 平台不包含在此独立仓库中。

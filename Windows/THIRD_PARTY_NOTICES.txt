@@ -1,0 +1,123 @@
+星猫键道 Windows 第三方软件声明
+
+本文件说明随 Windows 发行版交付的第三方引擎与依赖。Windows 原生前端与 Host
+按随附 LICENSE.txt 中的 GNU GPL 第 3 版条款分发；第三方组件和原方案资源仍保留
+各自的版权、许可、NOTICE 及源码中的声明。此声明不变更 Apple 平台或方案资源的许可。
+
+本发行版使用官方 librime 1.16.1 MSVC rime.dll。该 DLL 合并了 GNU GPLv3
+许可的 librime-octagram 插件；不能仅凭 librime 核心的 BSD 许可将组合 DLL
+描述为纯 BSD 软件。复制、修改和再分发该组合 DLL 须遵守适用的 GPLv3 条件。
+完整 GPLv3 文本随发行版的 licenses/librime-octagram-LICENSE 提供。
+
+对应源码须作为同一发行版本的可下载附件提供：
+  xmjd-windows-librime-1.16.1-sources.zip
+  xmjd-windows-librime-1.16.1-sources.provenance.json
+  xmjd-windows-librime-1.16.1-sources.SHA256SUMS.txt
+
+源码 ZIP 内包含源码本身（并非只含链接）：固定 librime 核心、所有递归子模块、
+三个插件、Lua 供应源码、官方完整 Lua 和 Boost 源码，原样保留上游构建脚本、
+内嵌依赖及许可。BUILD-SOURCES.txt 说明离线展开和 Windows 构建步骤；
+PROVENANCE.json 记录来源、提交、tree、文件 SHA-256 和两个架构的二进制校验值。
+自有 Windows 源码和项目构建/安装脚本由同版本的项目源码附件另行提供。
+本文件不取代完整许可文本。Windows 原生代码、构建与安装脚本随同版本项目源码提供。
+
+固定组件与许可证
+
+librime 1.16.1 — BSD-3-Clause
+  de4700e9f6b75b109910613df907965e3cbe0567
+  Copyright (c) 2014, RIME Developers. All rights reserved.
+  完整许可：licenses/librime-LICENSE
+
+librime-lua — BSD-3-Clause
+  68f9c364a2d25a04c7d4794981d7c796b05ab627
+  Copyright (c) 2021, librime-lua Developers. All rights reserved.
+  完整许可：licenses/librime-lua-LICENSE
+
+librime-octagram — GPL-3.0
+  dfcc15115788c828d9dd7b4bff68067d3ce2ffb8
+  完整许可：licenses/librime-octagram-LICENSE；源码归档保留原有署名。
+  此固定版本使用 librime、Boost 和 Darts；没有 KenLM 依赖。
+
+librime-predict — BSD-3-Clause
+  920bd41ebf6f9bf6855d14fbe80212e54e749791
+  Copyright (c) 2023, RIME Developers.
+  完整许可：licenses/librime-predict-LICENSE
+
+Lua 5.4.8 — MIT
+  Copyright (c) 1994-2025 Lua.org, PUC-Rio.
+  完整许可：licenses/Lua-lua.h 的末尾，以及官方源码 doc/readme.html。
+  插件实际使用的 thirdparty 分支固定于：
+  fa40fadd8af1e5b1fbd55703ccbd54476956d74c
+  供应源码包含修改过的 luaconf.h，未包含独立解释器 lua.c/luac.c；
+  对应源码包同时提供 Lua 官方完整发布归档，保留修改版与原版的区别。
+
+Boost 1.89.0 — BSL-1.0（各库保留其作者版权声明）
+  官方完整源码包含 LICENSE_1_0.txt、所有库源码及 build/bootstrap 脚本。
+  完整许可：licenses/Boost-LICENSE_1_0.txt
+
+OpenCC 1.1.9 — Apache-2.0
+  556ed22496d650bd0b13b6c163be9814637970ae
+  保留 OpenCC 源码中的作者版权和数据声明。
+  完整许可：licenses/OpenCC-LICENSE；内嵌组件见下方。
+
+glog — BSD-3-Clause
+  7b134a5c82c0c0b5698bb6bf7a835b230c5638e4
+  Copyright (c) 2024, Google Inc. All rights reserved.
+  完整许可：licenses/glog-COPYING
+
+LevelDB — BSD-3-Clause
+  99b3c03b3284f5886f9ef9a4ef703d57373e61be
+  Copyright (c) 2011 The LevelDB Authors. All rights reserved.
+  完整许可：licenses/leveldb-LICENSE
+
+marisa-trie 0.3.1 — BSD-2-Clause OR LGPL-2.1-or-later
+  3e87d53b78e15f2f43783d5e376561a8c9722051
+  Copyright (c) 2010-2025, Susumu Yata. All rights reserved.
+  本第三方交付采用上游提供的 BSD-2-Clause 选项，保留原始双许可说明。
+  完整许可：licenses/marisa-trie-COPYING.md
+
+yaml-cpp — MIT
+  2f86d13775d119edbb69af52e5f566fd65c6953b
+  Copyright (c) 2008-2015 Jesse Beder.
+  完整许可：licenses/yaml-cpp-LICENSE
+
+递归子模块与内嵌源码
+
+以下内容完整保留在对应父组件的源码归档中（测试/工具源码不表示它们都进入
+rime.dll）。各目录内的 LICENSE、COPYING、NOTICE、AUTHORS 和文件头完整保留。
+
+- GoogleTest（librime deps/googletest），BSD-3-Clause：
+  f8d7d77c06936315286eb55f8de22cd23c188571。
+- LevelDB third_party/benchmark（Google Benchmark），Apache-2.0：
+  bf585a2789e30585b4e3ce6baf11ef2750b54677。
+- LevelDB third_party/googletest，BSD-3-Clause：
+  c27acebba3b3c7d94209e0467b0a801db4af73ed。
+- yaml-cpp/test/googletest-1.13.0，BSD-3-Clause。
+- OpenCC/deps/marisa-0.2.6，BSD-2-Clause OR LGPL-2.1-or-later，
+  Copyright (c) 2010-2019, Susumu Yata；采用 BSD-2-Clause 选项。
+- OpenCC/deps/darts-clone-0.32 和 librime/include/darts.h，BSD-3-Clause，
+  Copyright (c) 2008-2013, Susumu Yata；许可在 librime/include/COPYING.darts-clone。
+- OpenCC/deps/rapidjson-1.1.0，MIT，
+  Copyright (C) 2015 THL A29 Limited, a Tencent company, and Milo Yip。
+  其 msinttypes 头文件保留 Alexander Chemeris 的 BSD 声明。
+  OpenCC 上游快照未附独立 license.txt，源码包补充经过 SHA-256 校验的
+  原始 licenses/RapidJSON-license.txt。该原始许可文件也描述上游完整版的
+  JSON_checker；OpenCC 内嵌目录仅有头文件，不含 bin/jsonchecker。
+- OpenCC/deps/tclap-1.2.5，MIT，
+  Copyright (c) 2003 Michael E. Smoot；(c) 2004 Daniel Aarno；
+  (c) 2017 Google Inc. 源码包补充原始 licenses/TCLAP-COPYING。
+- OpenCC/deps/googletest-1.15.0，BSD-3-Clause；
+  OpenCC/deps/google-benchmark，Apache-2.0；
+  OpenCC/deps/pybind11-2.13.1，BSD-3-Clause，原始许可与署名保留。
+- librime/include/utf8.h 及 include/utf8/*（UTF8-CPP），BSL-1.0，
+  Copyright 2006 Nemanja Trifunovic；每个头文件保留完整授权和免责声明。
+- librime/include/X11/keysym.h、keysymdef.h，X11 授权，
+  Copyright 1987, 1994, 1998 The Open Group；
+  Copyright 1987 Digital Equipment Corporation。完整声明在原始文件头。
+
+许可文本交付
+
+安装/便携包的 licenses 目录包含 librime.lock.json 固定并校验的完整许可证，
+以及官方依赖包内的原始许可和头文件声明。安装包和源码 ZIP 的 licenses 均包含
+RapidJSON 和 TCLAP 的独立许可补充文件；其余内嵌组件许可随原源码保留。
+不应删除这些声明或使用本概览替代完整授权条件。原始许可证以英文原文为准。
