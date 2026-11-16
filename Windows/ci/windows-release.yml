@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   windows:
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 45
     defaults:
       run:
@@ -22,6 +22,16 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $env:PATH = "C:\Program Files\7-Zip;$env:PATH"
           & .\Windows\scripts\build.ps1
+      - name: Build directly installable EXE
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\Windows\scripts\package-installer.ps1
+      - name: Test real installer and uninstaller
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = @(Get-ChildItem .\Windows\out\release\*-setup.exe)
+          if ($installer.Count -ne 1) { throw 'Expected one installer.' }
+          & .\Windows\ci\test-installer.ps1 -InstallerPath $installer[0].FullName
       - name: Preserve packages and test logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -29,6 +39,8 @@ jobs:
           name: windows-build-results
           path: |
             Windows/out/package/*.zip
+            Windows/out/release/*
+            Windows/out/installer-tests/*
             Windows/out/build/**/Testing/Temporary/*.log
           if-no-files-found: warn
           retention-days: 14

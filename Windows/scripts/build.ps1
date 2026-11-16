@@ -201,7 +201,16 @@ try {
     }
     [IO.File]::WriteAllText((Join-Path $stagingRoot $manifestName), ($manifest | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
     Assert-Package $stagingRoot
-    [IO.Compression.ZipFile]::CreateFromDirectory($stagingRoot, $stagingZip, [IO.Compression.CompressionLevel]::Optimal, $false)
+    # .NET Framework used by Windows PowerShell 5.1 writes backslashes in
+    # CreateFromDirectory. Set each ZIP entry name explicitly to portable '/'.
+    $zipStream = [IO.File]::Open($stagingZip, [IO.FileMode]::CreateNew)
+    $archive = [IO.Compression.ZipArchive]::new($zipStream, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($relative in (@($manifest.files | ForEach-Object { $_.path }) + @($manifestName))) {
+            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive,
+                (Join-Path $stagingRoot $relative), $relative, [IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    } finally { $archive.Dispose(); $zipStream.Dispose() }
     Assert-Package $stagingZip
     [IO.Directory]::Move($stagingRoot, $packageRoot)
     [IO.File]::Move($stagingZip, $zipPath)
