@@ -14,6 +14,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+Add-Type -AssemblyName System.IO.Compression
 $windowsRoot = Split-Path -Parent $PSScriptRoot
 $manifestName = 'manifest.json'
 
@@ -215,13 +216,17 @@ try {
     # .NET Framework used by Windows PowerShell 5.1 writes backslashes in
     # CreateFromDirectory. Set each ZIP entry name explicitly to portable '/'.
     $zipStream = [IO.File]::Open($stagingZip, [IO.FileMode]::CreateNew)
-    $archive = [IO.Compression.ZipArchive]::new($zipStream, [IO.Compression.ZipArchiveMode]::Create)
+    $archive = $null
     try {
+        $archive = [IO.Compression.ZipArchive]::new($zipStream, [IO.Compression.ZipArchiveMode]::Create)
         foreach ($relative in (@($manifest.files | ForEach-Object { $_.path }) + @($manifestName))) {
             [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive,
                 (Join-Path $stagingRoot $relative), $relative, [IO.Compression.CompressionLevel]::Optimal) | Out-Null
         }
-    } finally { $archive.Dispose(); $zipStream.Dispose() }
+    } finally {
+        try { if ($archive) { $archive.Dispose() } }
+        finally { $zipStream.Dispose() }
+    }
     Assert-Package $stagingZip
     [IO.Directory]::Move($stagingRoot, $packageRoot)
     [IO.File]::Move($stagingZip, $zipPath)
