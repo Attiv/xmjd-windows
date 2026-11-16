@@ -150,7 +150,7 @@ $schemaList = Start-Process -FilePath $settingsExe -ArgumentList '--schemas' -Wa
 if ($schemaList.ExitCode -ne 0) { throw "Settings schema listing failed: $($schemaList.ExitCode)" }
 $schemaText = [IO.File]::ReadAllText($schemaListFile, [Text.Encoding]::UTF8)
 if ($schemaText -notmatch 'schema ci_test ') { throw '导入的方案没有出现在方案列表。' }
-if ($schemaText -notmatch '(?m)^schema ci_test .* imported$') { throw '导入方案未标记为用户目录来源。' }
+if ($schemaText -notmatch '(?m)^schema ci_test .* imported\r?$') { throw '导入方案未标记为用户目录来源。' }
 $settingsCheckAfterImport = Start-Process -FilePath $settingsExe -ArgumentList '--check' -Wait -PassThru
 if ($settingsCheckAfterImport.ExitCode -ne 0) { throw "导入方案后自检失败：$($settingsCheckAfterImport.ExitCode)" }
 $removeSchemes = Start-Process -FilePath $settingsExe -ArgumentList '--remove-schemes' -Wait -PassThru
