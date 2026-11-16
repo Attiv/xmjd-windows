@@ -177,6 +177,21 @@ HRESULT enumeratorContains(IEnumGUID* enumerator, REFGUID expected, bool& presen
     return hr == S_FALSE ? S_OK : (FAILED(hr) ? hr : E_UNEXPECTED);
 }
 
+void traceRegistrationResult(const wchar_t* operation, HRESULT result, bool present = false) noexcept {
+    wchar_t path[32768]{};
+    const DWORD length = GetEnvironmentVariableW(L"XMJD_REGISTRATION_TRACE", path, static_cast<DWORD>(std::size(path)));
+    if (length == 0 || length >= std::size(path)) return;
+    const HANDLE file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    wchar_t message[192]{};
+    const int count = swprintf_s(message, L"%u-bit %s: 0x%08lX present=%d\r\n", static_cast<unsigned>(sizeof(void*) * 8),
+                                operation, static_cast<unsigned long>(result), present ? 1 : 0);
+    DWORD written = 0;
+    if (count > 0) WriteFile(file, message, static_cast<DWORD>(count * sizeof(wchar_t)), &written, nullptr);
+    CloseHandle(file);
+}
+
 HRESULT categoryPresent(ITfCategoryMgr* categories, REFGUID category, bool& present) {
     ComPtr<IEnumGUID> enumerator;
     const HRESULT hr = categories->EnumCategoriesInItem(kTipClsid, enumerator.GetAddressOf());
@@ -186,9 +201,12 @@ HRESULT categoryPresent(ITfCategoryMgr* categories, REFGUID category, bool& pres
 HRESULT removeCategory(ITfCategoryMgr* categories, REFGUID category) {
     bool present = false;
     HRESULT hr = categoryPresent(categories, category, present);
+    traceRegistrationResult(L"category before", hr, present);
     if (FAILED(hr) || !present) return hr;
     const HRESULT removed = categories->UnregisterCategory(kTipClsid, category, kTipClsid);
+    traceRegistrationResult(L"category remove", removed);
     hr = categoryPresent(categories, category, present);
+    traceRegistrationResult(L"category after", hr, present);
     if (FAILED(hr)) return hr;
     // TSF category membership is shared across bitness. A second DLL may find
     // it already removed; only confirmed absence makes that outcome successful.
@@ -218,11 +236,13 @@ HRESULT removeTipRegistration() {
         bool present = false;
         hr = profiles->EnumInputProcessorInfo(enumerator.GetAddressOf());
         if (SUCCEEDED(hr)) hr = enumeratorContains(enumerator.Get(), kTipClsid, present);
+        traceRegistrationResult(L"profile before", hr, present);
         if (SUCCEEDED(hr) && present) {
             const HRESULT removed = profiles->Unregister(kTipClsid);
             enumerator.Reset();
             hr = profiles->EnumInputProcessorInfo(enumerator.GetAddressOf());
             if (SUCCEEDED(hr)) hr = enumeratorContains(enumerator.Get(), kTipClsid, present);
+            traceRegistrationResult(L"profile after", hr, present);
             if (SUCCEEDED(hr) && present) hr = FAILED(removed) ? removed : E_FAIL;
         }
         if (FAILED(hr) && SUCCEEDED(result)) result = hr;

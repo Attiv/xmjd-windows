@@ -37,6 +37,23 @@ jobs:
           $ErrorActionPreference = 'Stop'
           git config --global core.longpaths true
           & .\Windows\scripts\package-sources.ps1
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $sourceZip = @(Get-ChildItem .\Windows\out\release\*-sources.zip)
+          if ($sourceZip.Count -ne 1) { throw 'Expected one corresponding-source ZIP.' }
+          $checkRoot = Join-Path $PWD 'Windows/out/source-check'
+          [IO.Compression.ZipFile]::ExtractToDirectory($sourceZip[0].FullName, $checkRoot)
+          $expand = @(Get-ChildItem -LiteralPath $checkRoot -Filter Expand-Sources.ps1 -Recurse)
+          if ($expand.Count -ne 1) { throw 'Expected one offline source expander.' }
+          $expanded = Join-Path $PWD 'Windows/out/expanded-sources'
+          & $expand[0].FullName -Destination $expanded
+          foreach ($required in @('librime/CMakeLists.txt', 'librime/plugins/lua/CMakeLists.txt',
+              'librime/plugins/octagram/CMakeLists.txt', 'rime-essay/essay.txt',
+              'lua-5.4.8/src/lua.c', 'boost_1_89_0/boost/version.hpp')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $expanded $required) -PathType Leaf)) {
+              throw "Offline source expansion is incomplete: $required"
+            }
+          }
+          Write-Output 'PASS: complete corresponding sources expanded offline on Windows.'
       - name: Assemble release hashes and project source
         run: |
           $ErrorActionPreference = 'Stop'
