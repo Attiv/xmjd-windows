@@ -65,6 +65,9 @@ Assert-Registration $false
 $powerShell = Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
 Invoke-CheckedProcess $resolvedInstaller ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG="' + (Join-Path $logRoot 'install.log') + '"')
 Assert-Registration $true
+$repeat = Start-Process -FilePath $resolvedInstaller -ArgumentList ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG="' + (Join-Path $logRoot 'repeat-install.log') + '"') -Wait -PassThru
+if ($repeat.ExitCode -eq 0) { throw 'Installer unexpectedly accepted an existing version directory.' }
+Assert-Registration $true
 $installedManifest = Get-Content -LiteralPath (Join-Path $installRoot 'manifest.json') -Raw | ConvertFrom-Json
 foreach ($entry in $installedManifest.files) {
     $file = Join-Path $installRoot $entry.path
@@ -86,6 +89,28 @@ $sentinel = Join-Path $dataRoot 'ci-preserve-user-data.txt'
 $sentinelText = [guid]::NewGuid().ToString('N')
 [IO.File]::WriteAllText($sentinel, $sentinelText)
 $uninstaller = Join-Path $installRoot 'unins000.exe'
+# Exercise the actual uninstaller's failure boundary with a reversible ownership
+# mismatch on this disposable runner. It must stop before deleting any payload.
+$base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+$metadata = $base.OpenSubKey('Software\XMJD', $true)
+try {
+    $metadata.SetValue('HostExecutablePath', (Join-Path $installRoot 'ownership-mismatch.exe'))
+    $failedUninstall = Start-Process -FilePath $uninstaller -ArgumentList ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' + (Join-Path $logRoot 'blocked-uninstall.log') + '"') -Wait -PassThru
+    if ($failedUninstall.ExitCode -eq 0) { throw 'Uninstaller did not report failed unregistration.' }
+    foreach ($entry in $installedManifest.files) {
+        $file = Join-Path $installRoot $entry.path
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256) {
+            throw "Failed unregistration removed or changed payload: $($entry.path)"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $uninstaller)) { throw 'Failed uninstall removed its retry entry point.' }
+} finally {
+    $metadata.SetValue('HostExecutablePath', (Join-Path $installRoot 'XMJDHost.exe'))
+    $metadata.Dispose()
+    $base.Dispose()
+}
+Assert-Registration $true
 Invoke-CheckedProcess $uninstaller ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' + (Join-Path $logRoot 'uninstall.log') + '"')
 Assert-Registration $false
 if (-not (Test-Path -LiteralPath $sentinel) -or [IO.File]::ReadAllText($sentinel) -ne $sentinelText) {
@@ -97,5 +122,5 @@ $package = Join-Path $windowsRoot "out/package/XMJD-$version-windows-x64-x86-Rel
 Invoke-CheckedProcess $powerShell ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $package 'scripts/unregister.ps1') + '" -InstallDirectory "' + $package + '"')
 Assert-Registration $false
 if (Test-Path -LiteralPath (Join-Path $installRoot 'XMJDHost.exe')) { throw 'Program files survived a clean uninstall.' }
-[IO.File]::WriteAllText((Join-Path $logRoot 'result.txt'), "PASS: silent install; x64/x86 COM; Host metadata; repeat registration; uninstall; repeat unregister; user data preserved.`r`n")
+[IO.File]::WriteAllText((Join-Path $logRoot 'result.txt'), "PASS: silent install; x64/x86 COM; Host metadata; repeat install rejected; repeat registration; failed unregister retained all payload and retry entry; uninstall; repeat unregister; user data preserved.`r`n")
 Write-Output 'Installer integration checks passed.'
