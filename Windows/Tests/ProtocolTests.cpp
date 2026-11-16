@@ -227,6 +227,11 @@ int testDecoderLimits() {
     CHECK(!decodeRequest(prefix + "1,\"operation\":\"health\",\"payload\":{\"unused\":{\"nested\":[]}}}"));
     CHECK(!decodeRequest(prefix + "1,\"operation\":\"finalize\",\"payload\":{\"convert\":truefalse}}"));
 
+    const std::string deploy = encodeRequest(request(Operation::Deploy, 1));
+    CHECK(!deploy.empty());
+    const auto decodedDeploy = decodeRequest(deploy);
+    CHECK(decodedDeploy && decodedDeploy->operation == Operation::Deploy);
+
     const std::string health = encodeRequest(request(Operation::Health, 1));
     for (std::size_t length = 0; length < health.size(); ++length) {
         CHECK(!decodeRequest(std::string_view(health).substr(0, length)));

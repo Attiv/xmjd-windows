@@ -33,7 +33,10 @@ public:
     PipeClient& operator=(const PipeClient&) = delete;
     // No launch/wait/retry: CreateFile on an already-listening pipe only.
     bool connect(const std::filesystem::path& expectedHost);
-    std::optional<Response> transact(const Request& request, DWORD deadlineMs = kInputDeadlineMs);
+    // Control requests (deploy) may legitimately exceed the 50 ms input budget.
+    // Ordinary input clients never pass control=true.
+    std::optional<Response> transact(const Request& request, DWORD deadlineMs = kInputDeadlineMs,
+                                     bool control = false);
     void close() noexcept;
     bool connected() const noexcept { return pipe_ != INVALID_HANDLE_VALUE; }
     std::uint64_t epoch() const noexcept { return epoch_; }

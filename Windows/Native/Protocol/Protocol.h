@@ -15,7 +15,7 @@ inline constexpr std::size_t kMaxCandidates = 128;
 inline constexpr std::uint32_t kInputDeadlineMs = 50;
 inline constexpr std::uint32_t kReleaseMask = 1u << 30;
 
-enum class Operation { Health, CreateSession, ProcessKey, SelectCandidate, Finalize, Cancel, DestroySession };
+enum class Operation { Health, CreateSession, ProcessKey, SelectCandidate, Finalize, Cancel, DestroySession, Deploy };
 enum class Status { Ok, Unavailable, Busy, Stale, UnsupportedVersion, InvalidRequest, EngineFailure };
 struct Identity {
     std::uint32_t version = kProtocolVersion;

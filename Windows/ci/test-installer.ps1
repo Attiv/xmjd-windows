@@ -91,6 +91,23 @@ Assert-Registration $true
 $installedManifest = Get-Content -LiteralPath (Join-Path $installRoot 'manifest.json') -Raw | ConvertFrom-Json
 Assert-InstalledPayload
 $manifestHash = (Get-FileHash -LiteralPath (Join-Path $installRoot 'manifest.json') -Algorithm SHA256).Hash
+$settingsExe = Join-Path $installRoot 'XMJDSettings.exe'
+if (-not (Test-Path -LiteralPath $settingsExe -PathType Leaf)) { throw 'Missing XMJDSettings.exe.' }
+$settingsCheck = Start-Process -FilePath $settingsExe -ArgumentList '--check' -Wait -PassThru
+if ($settingsCheck.ExitCode -ne 0) { throw "Settings self-check failed: $($settingsCheck.ExitCode)" }
+$settingsSelect = Start-Process -FilePath $settingsExe -ArgumentList '--select pinyin_simp' -Wait -PassThru
+if ($settingsSelect.ExitCode -ne 0) { throw "Settings scheme selection failed: $($settingsSelect.ExitCode)" }
+$settingsRoot = Join-Path $env:LOCALAPPDATA 'XMJD'
+if (-not (Select-String -LiteralPath (Join-Path $settingsRoot 'settings.ini') -Pattern '^schema=pinyin_simp$' -Quiet)) {
+    throw 'Settings did not persist the selected scheme.'
+}
+$customConfig = Get-Content -LiteralPath (Join-Path $settingsRoot 'UserData/Rime/default.custom.yaml') -Raw
+if ($customConfig -notmatch '(?m)^\s+- schema: pinyin_simp\s*$') {
+    throw 'Settings did not write schema_list to default.custom.yaml.'
+}
+$settingsShortcut = Join-Path $env:ProgramData 'Microsoft/Windows/Start Menu/Programs/星猫键道/星猫键道设置.lnk'
+if (-not (Test-Path -LiteralPath $settingsShortcut -PathType Leaf)) { throw 'Missing Start Menu settings shortcut.' }
+Write-Output 'PASS: settings app self-check, scheme persistence and Start Menu shortcut.'
 Invoke-CheckedProcess $powerShell ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $installRoot 'scripts/register.ps1') + '" -InstallDirectory "' + $installRoot + '"')
 Assert-Registration $true
 & (Join-Path $PSScriptRoot 'test-host.ps1') -HostPath (Join-Path $installRoot 'XMJDHost.exe')
@@ -166,5 +183,7 @@ $package = Join-Path $windowsRoot "out/package/XMJD-$version-windows-x64-x86-Rel
 Invoke-CheckedProcess $powerShell ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $package 'scripts/unregister.ps1') + '" -InstallDirectory "' + $package + '"')
 Assert-Registration $false
 if (Test-Path -LiteralPath (Join-Path $installRoot 'XMJDHost.exe')) { throw 'Program files survived a clean uninstall.' }
-[IO.File]::WriteAllText((Join-Path $logRoot 'result.txt'), "PASS: silent install; x64/x86 COM; Host metadata; repeat install rejected; repeat registration; mismatched ownership blocked uninstall and repair; missing x86 DLL blocked uninstall and retained remaining payload; /REPAIR restored manifest and dual-architecture registration; uninstall; repeat unregister; repair and uninstall preserved user data.`r`n")
+if (Test-Path -LiteralPath (Join-Path $installRoot 'XMJDSettings.exe')) { throw 'Settings program survived a clean uninstall.' }
+if (Test-Path -LiteralPath $settingsShortcut) { throw 'Settings Start Menu shortcut survived uninstall.' }
+[IO.File]::WriteAllText((Join-Path $logRoot 'result.txt'), "PASS: silent install; x64/x86 COM; Host metadata; settings self-check and scheme persistence; Start Menu shortcut; repeat install rejected; repeat registration; mismatched ownership blocked uninstall and repair; missing x86 DLL blocked uninstall and retained remaining payload; /REPAIR restored manifest and dual-architecture registration; uninstall; repeat unregister; repair and uninstall preserved user data.`r`n")
 Write-Output 'Installer integration checks passed.'

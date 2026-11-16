@@ -343,6 +343,18 @@ if(XMJD_ARCH STREQUAL "x64")
   endif()
   message(STATUS "Dependency content verified; Host must still pass find_module(lua) at runtime")
   configure_file(cmake/HostVersion.rc.in "${XMJD_GENERATED_DIR}/HostVersion.rc" @ONLY)
+  configure_file(cmake/SettingsVersion.rc.in "${XMJD_GENERATED_DIR}/SettingsVersion.rc" @ONLY)
+  add_executable(XMJDSettings WIN32
+    Native/Settings/Main.cpp
+    Native/Settings/Settings.rc
+    "${XMJD_GENERATED_DIR}/SettingsVersion.rc")
+  target_include_directories(XMJDSettings PRIVATE
+    "${XMJD_GENERATED_DIR}" "${XMJD_ROOT}/Native/Settings")
+  target_link_libraries(XMJDSettings PRIVATE xmjd_windows_common comctl32 user32 shell32 ole32)
+  set_target_properties(XMJDSettings PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+    VS_DPI_AWARE "PerMonitor")
+  install(TARGETS XMJDSettings RUNTIME DESTINATION .)
   add_executable(XMJDHost
     Native/Host/Main.cpp
     Native/Host/RimeRuntime.cpp

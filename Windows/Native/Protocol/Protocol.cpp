@@ -21,6 +21,7 @@ const char* operationName(Operation operation) noexcept {
     case Operation::Finalize: return "finalize";
     case Operation::Cancel: return "cancel";
     case Operation::DestroySession: return "destroySession";
+    case Operation::Deploy: return "deploy";
     }
     return nullptr;
 }
@@ -33,6 +34,7 @@ std::optional<Operation> parseOperation(std::string_view name) noexcept {
     if (name == "finalize") return Operation::Finalize;
     if (name == "cancel") return Operation::Cancel;
     if (name == "destroySession") return Operation::DestroySession;
+    if (name == "deploy") return Operation::Deploy;
     return std::nullopt;
 }
 
@@ -389,6 +391,7 @@ bool validateRequestPayload(Operation operation, const RequestPayload& payload) 
     case Operation::CreateSession:
     case Operation::Cancel:
     case Operation::DestroySession:
+    case Operation::Deploy:
         return !payload.hasKeycode && !payload.hasModifiers && !payload.hasCandidateIndex && !payload.hasSnapshotRevision && !payload.hasConvert;
     }
     return false;
@@ -508,6 +511,7 @@ bool validRequestForEncoding(const Request& request) noexcept {
     case Operation::Finalize:
     case Operation::Cancel:
     case Operation::DestroySession:
+    case Operation::Deploy:
         return true;
     }
     return false;
@@ -700,6 +704,7 @@ std::string encodeRequest(const Request& request) {
     case Operation::CreateSession:
     case Operation::Cancel:
     case Operation::DestroySession:
+    case Operation::Deploy:
         break;
     }
     output += "}}";

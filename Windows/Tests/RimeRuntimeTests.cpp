@@ -1,7 +1,9 @@
 #include "../Native/Host/RimeRuntime.h"
 #include "../Native/Common/Pipe.h"
 
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
@@ -173,7 +175,38 @@ void testRuntime(const std::filesystem::path& hostDirectory, const std::filesyst
     require(!runtime.selectCandidate(session, 0), "已销毁会话仍可选择候选");
     requireEmpty(runtime.snapshot(session));
     require(deliveredCommits == 4 && deliveredText == "你不n個", "上屏次数或汇总文本异常");
-    std::cout << "RimeRuntimeTests 通过：上屏次数=4，文本=[" << deliveredText << "]" << std::endl;
+
+    stage = "切换拼音方案、重新部署并验证真实拼音候选";
+    {
+        std::ofstream settings(root / L"settings.ini", std::ios::binary | std::ios::trunc);
+        settings << "schema=pinyin_simp\n";
+        std::ofstream custom(root / L"UserData/Rime/default.custom.yaml", std::ios::binary | std::ios::trunc);
+        custom << "patch:\n  schema_list:\n    - schema: pinyin_simp\n    - schema: xmjd6\n    - schema: liangfen\n";
+    }
+    int redeployError = 0;
+    require(runtime.redeploy(redeployError),
+            "切换到拼音方案重新部署失败，runtime errorCode=" + std::to_string(redeployError));
+    const auto pinyinSession = runtime.createSession();
+    require(pinyinSession != 0, "拼音方案会话创建失败");
+    for (const char key : std::string("nihao")) {
+        require(runtime.processKey(pinyinSession, static_cast<unsigned char>(key), 0),
+                std::string("拼音方案未处理按键 ") + key);
+    }
+    const auto pinyinSnapshot = runtime.snapshot(pinyinSession);
+    require(!pinyinSnapshot.rawInput.empty() && !pinyinSnapshot.preedit.empty() &&
+                !pinyinSnapshot.candidates.empty(),
+            "拼音方案未生成候选；" + describe(pinyinSnapshot));
+    const auto nihao = std::find_if(pinyinSnapshot.candidates.begin(), pinyinSnapshot.candidates.end(),
+        [](const auto& candidate) { return candidate.text == "你好"; });
+    require(nihao != pinyinSnapshot.candidates.end(), "拼音方案候选缺少 你好；" + describe(pinyinSnapshot));
+    const auto nihaoIndex = static_cast<std::uint32_t>(
+        std::distance(pinyinSnapshot.candidates.begin(), nihao));
+    require(runtime.selectCandidate(pinyinSession, nihaoIndex), "拼音方案选择 你好 失败");
+    const auto pinyinCommit = runtime.snapshot(pinyinSession);
+    require(pinyinCommit.commitText == "你好", "拼音方案上屏文本异常；" + describe(pinyinCommit));
+    runtime.destroySession(pinyinSession);
+    std::cout << "RimeRuntimeTests 通过：上屏次数=4，文本=[" << deliveredText
+              << "]，拼音切换提交=[" << pinyinCommit.commitText << "]" << std::endl;
 }
 } // namespace
 

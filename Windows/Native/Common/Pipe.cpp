@@ -461,14 +461,16 @@ bool PipeClient::connect(const std::filesystem::path& expectedHost) {
     return true;
 }
 
-std::optional<Response> PipeClient::transact(const Request& request, DWORD deadlineMs) {
+std::optional<Response> PipeClient::transact(const Request& request, DWORD deadlineMs, bool control) {
     if (!connected() || request.id.connectionEpoch != epoch_ || request.id.version != kProtocolVersion) return std::nullopt;
     const std::string encoded = encodeRequest(request);
     if (encoded.empty()) {
         close();
         return std::nullopt;
     }
-    LocalDeadline deadline(std::min<DWORD>(deadlineMs, static_cast<DWORD>(kInputDeadlineMs)));
+    constexpr DWORD kControlDeadlineMs = 10 * 60 * 1000;
+    LocalDeadline deadline(std::min<DWORD>(deadlineMs,
+        control ? kControlDeadlineMs : static_cast<DWORD>(kInputDeadlineMs)));
     if (!writeFrameUntil(pipe_, encoded, deadline)) {
         close();
         return std::nullopt;

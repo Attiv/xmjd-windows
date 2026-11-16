@@ -22,6 +22,9 @@ public:
     RimeRuntime& operator=(const RimeRuntime&) = delete;
 
     bool initialize(bool explicitDeploy, int& errorCode);
+    // Rebuilds Rime's compiled data from the current user configuration. Active
+    // sessions are destroyed; clients must create fresh sessions afterwards.
+    bool redeploy(int& errorCode);
     bool ready() const override;
     std::uint64_t createSession() override;
     void destroySession(std::uint64_t session) override;
@@ -45,6 +48,11 @@ private:
     Session* findSession(std::uint64_t session);
     bool sessionHealthy(RimeSessionId session, const char* expectedSchema = nullptr);
     std::vector<std::pair<std::string, std::string>> schemaList();
+    std::filesystem::path settingsPath() const;
+    std::string readSettingsSchema() const;
+    bool writeSettingsSchema(const std::string& schema);
+    bool loadSelectedSchema();
+    void rememberSessionSchema(RimeSessionId session);
 
     std::filesystem::path executableDirectory_;
     std::filesystem::path rootDirectory_;
@@ -59,6 +67,7 @@ private:
     std::string distributionCodeName_ = "xmjd";
     std::string appName_ = "rime.xmjd";
     std::string logDirectoryUtf8_;
+    std::string selectedSchema_ = "xmjd6";
     RimeTraits traits_{};
     HMODULE library_ = nullptr;
     RimeApi* api_ = nullptr;

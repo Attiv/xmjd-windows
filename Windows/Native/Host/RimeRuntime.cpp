@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -22,6 +23,22 @@ constexpr int kRuntimeErrorLua = 14;
 constexpr int kRuntimeErrorDeployment = 15;
 constexpr int kRuntimeErrorSchema = 16;
 constexpr int kRuntimeErrorSession = 17;
+
+std::string trimAscii(std::string_view value) {
+    std::size_t begin = 0;
+    std::size_t end = value.size();
+    while (begin < end && (value[begin] == ' ' || value[begin] == '\t')) ++begin;
+    while (end > begin && (value[end - 1] == ' ' || value[end - 1] == '\t' || value[end - 1] == '\r')) --end;
+    return std::string(value.substr(begin, end - begin));
+}
+
+bool validSchemaId(std::string_view id) {
+    if (id.empty() || id.size() > 64) return false;
+    for (const unsigned char byte : id) {
+        if (!(std::isalnum(byte) || byte == '.' || byte == '_' || byte == '-')) return false;
+    }
+    return true;
+}
 
 bool writeFile(const std::filesystem::path& path, std::string_view value) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
@@ -231,8 +248,10 @@ bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
             return false;
         }
 
+        const auto deployMarker = stagingDirectory_ / L".xmjd-deploy-pending";
+        const bool settingsDeployPending = hasFile(deployMarker);
         bool pendingInitialDeploy = recoveredInitialDeploy ||
-            hasFile(stagingDirectory_ / L".xmjd-resource-pending");
+            hasFile(stagingDirectory_ / L".xmjd-resource-pending") || settingsDeployPending;
         if (!publishResources(explicitDeploy, pendingInitialDeploy, errorCode)) return false;
         if (!loadLibrary(errorCode)) return false;
 
@@ -258,6 +277,10 @@ bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
             if (!runDeployment(errorCode)) return false;
         }
         if (!validateSchemas(errorCode)) return false;
+        if (!loadSelectedSchema()) {
+            errorCode = kRuntimeErrorSchema;
+            return false;
+        }
         if (pendingInitialDeploy) {
             if (!writeFile(sharedDirectory_ / L".xmjd-resource-ready", "xmjd6\n")) {
                 errorCode = kRuntimeErrorResources;
@@ -279,6 +302,8 @@ bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
                 errorCode = kRuntimeErrorResources;
                 return false;
             }
+            // Best effort: a leftover marker only causes one extra deployment.
+            DeleteFileW(deployMarker.c_str());
         }
         ready_ = true;
         return true;
@@ -485,6 +510,65 @@ bool RimeRuntime::validateSchemas(int& errorCode) {
     return valid;
 }
 
+std::filesystem::path RimeRuntime::settingsPath() const {
+    return rootDirectory_ / L"settings.ini";
+}
+
+std::string RimeRuntime::readSettingsSchema() const {
+    const auto contents = readSmallFile(settingsPath());
+    if (!contents) return {};
+    std::size_t offset = 0;
+    while (offset < contents->size()) {
+        const auto end = contents->find('\n', offset);
+        const auto line = trimAscii(std::string_view(*contents).substr(
+            offset, end == std::string::npos ? std::string::npos : end - offset));
+        const auto equals = line.find('=');
+        if (equals != std::string::npos && line.compare(0, equals, "schema") == 0) {
+            const std::string value = trimAscii(std::string_view(line).substr(equals + 1));
+            if (validSchemaId(value)) return value;
+        }
+        if (end == std::string::npos) break;
+        offset = end + 1;
+    }
+    return {};
+}
+
+bool RimeRuntime::writeSettingsSchema(const std::string& schema) {
+    if (!validSchemaId(schema)) return false;
+    const auto temporary = settingsPath().wstring() + L".tmp";
+    if (!writeFile(temporary, "schema=" + schema + "\n")) return false;
+    return MoveFileExW(temporary.c_str(), settingsPath().c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+}
+
+bool RimeRuntime::loadSelectedSchema() {
+    const auto schemas = schemaList();
+    if (schemas.empty()) return false;
+    const std::string desired = readSettingsSchema();
+    const auto requested = std::find_if(schemas.begin(), schemas.end(),
+        [&](const auto& item) { return item.first == desired; });
+    if (requested != schemas.end()) {
+        selectedSchema_ = requested->first;
+        return true;
+    }
+    const auto main = std::find_if(schemas.begin(), schemas.end(),
+        [](const auto& item) { return item.first == "xmjd6"; });
+    selectedSchema_ = main != schemas.end() ? main->first : schemas.front().first;
+    return true;
+}
+
+void RimeRuntime::rememberSessionSchema(RimeSessionId session) {
+    if (!api_ || !api_->get_status || !api_->free_status || session == 0) return;
+    RimeStatus status{};
+    RIME_STRUCT_INIT(RimeStatus, status);
+    const std::unique_ptr<RimeStatus, decltype(api_->free_status)> cleanup(&status, api_->free_status);
+    if (!api_->get_status(session, &status) || !status.schema_id) return;
+    const std::string schema(status.schema_id);
+    if (!validSchemaId(schema) || schema == selectedSchema_) return;
+    selectedSchema_ = schema;
+    writeSettingsSchema(schema);
+}
+
 bool RimeRuntime::sessionHealthy(RimeSessionId session, const char* expectedSchema) {
     RimeStatus status{};
     RIME_STRUCT_INIT(RimeStatus, status);
@@ -494,12 +578,35 @@ bool RimeRuntime::sessionHealthy(RimeSessionId session, const char* expectedSche
            (!expectedSchema || std::string_view(status.schema_id) == expectedSchema);
 }
 
+bool RimeRuntime::redeploy(int& errorCode) {
+    errorCode = 0;
+    if (!initialized_ || !api_) {
+        errorCode = kRuntimeErrorDeployment;
+        return false;
+    }
+    ready_ = false;
+    for (auto& entry : sessions_) {
+        if (entry.second.id) api_->destroy_session(entry.second.id);
+    }
+    sessions_.clear();
+    if (!runDeployment(errorCode)) return false;
+    if (!validateSchemas(errorCode)) return false;
+    if (!loadSelectedSchema()) {
+        errorCode = kRuntimeErrorSchema;
+        return false;
+    }
+    DeleteFileW((stagingDirectory_ / L".xmjd-deploy-pending").c_str());
+    ready_ = true;
+    return true;
+}
+
 bool RimeRuntime::ready() const { return ready_; }
 
 std::uint64_t RimeRuntime::createSession() {
     if (!ready_ || !api_) return 0;
     const RimeSessionId id = api_->create_session();
-    if (!id || !api_->select_schema(id, "xmjd6") || !sessionHealthy(id, "xmjd6")) {
+    if (!id || selectedSchema_.empty() || !api_->select_schema(id, selectedSchema_.c_str()) ||
+        !sessionHealthy(id, selectedSchema_.c_str())) {
         if (id) api_->destroy_session(id);
         return 0;
     }
@@ -525,7 +632,12 @@ RimeRuntime::Session* RimeRuntime::findSession(std::uint64_t session) {
 void RimeRuntime::destroySession(std::uint64_t session) {
     const auto found = sessions_.find(session);
     if (found == sessions_.end()) return;
-    if (found->second.id) api_->destroy_session(found->second.id);
+    if (found->second.id) {
+        // F4 switcher changes only the live session. Persist that choice so a
+        // new field or application keeps the user's scheme.
+        rememberSessionSchema(found->second.id);
+        api_->destroy_session(found->second.id);
+    }
     sessions_.erase(found);
 }
 

@@ -54,8 +54,15 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "{#PackageDirectory}\manifest.json"; DestName: "XMJD-repair-manifest.json"; Flags: dontcopy
 Source: "{#PackageDirectory}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs uninsrestartdelete
 
+[Icons]
+Name: "{autoprograms}\星猫键道\星猫键道设置"; Filename: "{app}\XMJDSettings.exe"; WorkingDir: "{app}"
+Name: "{autoprograms}\星猫键道\卸载星猫键道"; Filename: "{uninstallexe}"
+
+[Run]
+Filename: "{app}\XMJDSettings.exe"; Description: "打开星猫键道设置并选择输入方案"; Flags: postinstall nowait skipifsilent runasoriginaluser
+
 [Messages]
-FinishedLabel=XMJD has been installed and registered for x64 and x86 applications.%n%nSelect XMJD manually in Windows Settings. The Host starts in your normal desktop session when XMJD is activated or at your next sign-in. Your default input method was not changed.
+FinishedLabel=XMJD has been installed and registered for x64 and x86 applications.%n%nUse the Start Menu shortcut "星猫键道设置" to choose an input scheme. Then add XMJD in Windows Settings and press Win+Space. The Host starts in your normal desktop session when XMJD is activated or at your next sign-in. Your default input method was not changed.
 ConfirmUninstall=Remove XMJD and its x64/x86 input-method registration?%n%nYour local XMJD user data will be preserved. Applications using the input method will not be closed. A restart may be required to remove loaded program files.
 
 [Code]
@@ -282,8 +289,9 @@ begin
     RegValueExists(HKLM64, 'Software\XMJD', 'HostExecutablePath') or
     RegValueExists(HKLM64, 'Software\XMJD', 'RegistrationComplete') or
     RegValueExists(HKLM64, StartupKey, 'XMJDHost') then
-    Result := 'An XMJD installation or partial registration already exists. Uninstall it first. ' +
-      'If it was installed manually, run that installation''s scripts\unregister.ps1 as administrator before retrying.';
+    Result := 'An XMJD installation or partial registration already exists. Uninstall the previous XMJD version first; ' +
+      'your user data will be preserved. If it was installed manually, run that installation''s scripts\unregister.ps1 ' +
+      'as administrator before retrying.';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

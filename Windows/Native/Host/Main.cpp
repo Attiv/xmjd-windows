@@ -217,6 +217,7 @@ struct ServerState {
     std::mutex pipesMutex;
     std::array<HANDLE, kMaxConnections> activePipes{};
     xmjd::Engine& engine;
+    std::function<bool(int&)> deploy;
 
     explicit ServerState(xmjd::Engine& value) : engine(value) { activePipes.fill(INVALID_HANDLE_VALUE); }
 
@@ -229,6 +230,16 @@ struct ServerState {
         std::lock_guard<std::mutex> lock(pipesMutex);
         for (HANDLE pipe : activePipes) {
             if (pipe != INVALID_HANDLE_VALUE) CancelIoEx(pipe, nullptr);
+        }
+    }
+
+    // Deployment destroys every engine session. Reset input connections so the
+    // TIPs recreate sessions against the newly active scheme instead of
+    // retaining dead engine IDs.
+    void cancelPipesExcept(HANDLE current) {
+        std::lock_guard<std::mutex> lock(pipesMutex);
+        for (HANDLE pipe : activePipes) {
+            if (pipe != INVALID_HANDLE_VALUE && pipe != current) CancelIoEx(pipe, nullptr);
         }
     }
 };
@@ -262,9 +273,29 @@ void connectionWorker(ServerState& state, std::size_t workerIndex) noexcept {
                     if (!request) break;
 
                     xmjd::Response response;
+                    bool resetInputConnections = false;
                     {
                         std::unique_lock<std::mutex> gate(state.engineGate, std::try_to_lock);
-                        if (gate.owns_lock()) {
+                        if (gate.owns_lock() && request->operation == xmjd::Operation::Deploy) {
+                            response.id = request->id;
+                            response.id.version = xmjd::kProtocolVersion;
+                            if (request->id.version != xmjd::kProtocolVersion) {
+                                response.status = xmjd::Status::UnsupportedVersion;
+                            } else if (request->id.connectionEpoch == 0 || request->id.sessionId != 0 ||
+                                       request->id.contextEpoch != 0) {
+                                response.status = xmjd::Status::InvalidRequest;
+                            } else if (!state.deploy) {
+                                response.status = xmjd::Status::Unavailable;
+                            } else {
+                                int deployError = 0;
+                                const bool deployed = state.deploy(deployError);
+                                response.status = deployed ? xmjd::Status::Ok : xmjd::Status::EngineFailure;
+                                response.handled = deployed;
+                                // Control-only diagnostic channel; the TIP never sends Deploy.
+                                response.snapshot.page = static_cast<std::uint32_t>(deployError);
+                                resetInputConnections = deployed;
+                            }
+                        } else if (gate.owns_lock()) {
                             response = broker->dispatch(*request);
                         } else {
                             response.id = request->id;
@@ -272,8 +303,10 @@ void connectionWorker(ServerState& state, std::size_t workerIndex) noexcept {
                             response.status = xmjd::Status::Busy;
                         }
                     }
+                    if (resetInputConnections) state.cancelPipesExcept(pipe.get());
                     const std::string encoded = xmjd::encodeResponse(response);
                     if (!xmjd::win::writeFrame(pipe.get(), encoded, xmjd::kInputDeadlineMs)) break;
+                    if (resetInputConnections) break;
                 }
                 std::lock_guard<std::mutex> gate(state.engineGate);
                 broker.reset();
@@ -385,6 +418,7 @@ int runHost(int argc, wchar_t** argv) {
     }
 
     ServerState state(runtime);
+    state.deploy = [&runtime](int& error) { return runtime.redeploy(error); };
     state.stopEvent = stopEvent.get();
     state.workersDoneEvent = workersDoneEvent.get();
     state.firstPipe = firstPipe.get();

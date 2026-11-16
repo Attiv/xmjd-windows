@@ -1,0 +1,29 @@
+#pragma code_page(65001)
+#include <windows.h>
+#include "resource.h"
+
+IDD_SETTINGS DIALOGEX 0, 0, 352, 262
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "星猫键道设置"
+FONT 9, "Microsoft YaHei UI", 400, 0, 0x86
+BEGIN
+    ICON            1, IDC_APPICON, 14, 12, 20, 20
+    LTEXT           "星猫键道 Windows", IDC_TITLE, 42, 12, 180, 12
+    LTEXT           "", IDC_VERSION, 42, 26, 180, 10
+    LTEXT           "引擎状态：正在检查…", IDC_STATUS, 42, 42, 296, 12
+
+    GROUPBOX        "输入方案", -1, 14, 62, 324, 104
+    LISTBOX         IDC_SCHEMA_LIST, 26, 78, 300, 56, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "方案决定输入编码。想先用拼音验证，请选择“袖珍简化字拼音”。", IDC_SCHEMA_HINT, 26, 140, 300, 12
+    LTEXT           "切换后点击“应用并部署”，可能需要一分钟编译词典。", IDC_SCHEMA_HELP, 26, 152, 300, 10
+
+    PUSHBUTTON      "应用并部署", IDC_APPLY, 14, 176, 80, 18, BS_DEFPUSHBUTTON
+    PUSHBUTTON      "重新部署", IDC_REDEPLOY, 100, 176, 64, 18
+    PUSHBUTTON      "启动引擎", IDC_START_HOST, 170, 176, 64, 18
+    PUSHBUTTON      "语言设置", IDC_OPEN_LANGUAGE, 240, 176, 64, 18
+    PUSHBUTTON      "关闭", IDCANCEL, 310, 176, 28, 18
+
+    PUSHBUTTON      "打开用户目录", IDC_OPEN_USER, 14, 200, 80, 18
+    PUSHBUTTON      "打开日志", IDC_OPEN_LOG, 100, 200, 64, 18
+    LTEXT           "添加方法：Windows 设置 → 时间和语言 → 语言和区域 → 中文 → 键盘 → 添加键盘 → XMJD，然后按 Win+Space 切换。", -1, 14, 226, 324, 30
+END

@@ -58,7 +58,12 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $releaseRoot = Join-Path $PWD 'Windows/out/release'
-          git archive --format=zip --output="$releaseRoot/XMJD-0.1.2+3-project-source.zip" HEAD
+          $parts = @{}
+          foreach ($line in (Get-Content -LiteralPath .\Windows\VERSION)) {
+            if ($line -match '^(MAJOR|MINOR|PATCH|BUILD)=([0-9]+)$') { $parts[$Matches[1]] = $Matches[2] }
+          }
+          $version = '{0}.{1}.{2}+{3}' -f $parts.MAJOR, $parts.MINOR, $parts.PATCH, $parts.BUILD
+          git archive --format=zip --output="$releaseRoot/XMJD-$version-project-source.zip" HEAD
           if ($LASTEXITCODE -ne 0) { throw 'Project source archive failed.' }
           $lines = @(Get-ChildItem -LiteralPath $releaseRoot -File | Sort-Object Name | ForEach-Object {
             (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $_.Name

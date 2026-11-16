@@ -4,7 +4,9 @@
 
 The owner authorized M0-M2 implementation on macOS, then explicitly authorized a
 separate public Windows repository and a directly installable GitHub Release on
-2026-11-16. Version 0.1.2+3 extends delivery with an Inno Setup installer, actual
+2026-11-16. Version 0.1.3+4 adds the missing first-use surface requested after
+testing 0.1.2+3: a native settings program with scheme selection, engine status,
+explicit deployment and diagnostics. It retains the Inno Setup installer, actual
 Windows CI, and binary/source release attachments. The repository is
 https://github.com/Attiv/xmjd-windows. Validation evidence and remaining interactive
 acceptance gates are documented in `Windows/README.md`.
@@ -42,7 +44,8 @@ reskin.
 ## Readiness
 
 M0-M2 source/developer delivery was completed at 0.1.1+2. The direct-install
-public delivery round uses 0.1.2+3. This
+public delivery round started at 0.1.2+3; 0.1.3+4 adds first-use settings and
+scheme selection. This
 includes native input/candidates, Host startup/recovery, resource and dependency
 validation, package manifests, and installation/registration scripts. M0-M2
 runtime acceptance remains open until verified on Windows. Do not repeat a
@@ -405,6 +408,38 @@ its old toolchain/instructions need current Windows verification.
 - [Named pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
 - [UI Automation text patterns cannot themselves write text](https://learn.microsoft.com/en-us/dotnet/framework/ui-automation/ui-automation-textpattern-overview)
 - [Pinned WinUI design/development skill](https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/winui-app)
+
+## First-Use Settings and Scheme Selection (0.1.3+4)
+
+The 0.1.2+3 first-use report was accurate: it installed only the input core, left
+one language-bar icon and had no settings window or user-visible scheme picker.
+The fallback configuration also enabled only `xmjd6`, and the engine selected
+`xmjd6` unconditionally when creating a session.
+
+0.1.3+4 closes that usability gap:
+
+- `XMJDSettings.exe`, a native Win32 dialog installed with the product and linked
+  from the Start Menu. The installer offers to open it as the original ordinary
+  user after installation.
+- It lists the deployed schemes by reading `Resources\Rime\*.schema.yaml`, hides
+  auxiliary schemes marked 勿选, shows Host health, and offers apply/deploy,
+  redeploy, start engine, open user data, open logs and Windows language settings.
+- Applying a scheme writes `%LOCALAPPDATA%\XMJD\settings.ini` and updates the
+  user-level `default.custom.yaml` `schema_list` while preserving other patches.
+  The selected scheme is placed first. Switching F4/Ctrl+grave in a live session
+  is written back when that session is destroyed.
+- Host protocol v1 adds a control-only `deploy` operation. The Host destroys
+  active engine sessions, runs Rime maintenance, validates every listed scheme,
+  reloads the selected scheme and resets input pipe connections so TIPs recreate
+  sessions against the new scheme. The 50 ms key path remains unchanged.
+- A deploy marker lets the next Host startup perform maintenance even when the
+  settings program cannot reach a running Host. `XMJDSettings.exe --check` and
+  `--select <schema>` provide deterministic installer-CI coverage.
+
+Real Windows CI must still verify the new dialog binary, settings persistence,
+scheme-list generation and the pinyin redeploy/commit path, plus the existing
+install/repair/uninstall gates. Desktop TSF typing and DPI/candidate placement
+remain owner acceptance.
 
 ## Public Windows Delivery Evidence (0.1.2+3)
 
