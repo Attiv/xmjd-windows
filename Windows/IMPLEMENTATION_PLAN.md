@@ -137,7 +137,7 @@ Windows/
   Native/Protocol/          # small versioned IPC contract
   Desktop/                  # C# WinUI companion, starts in M3
   Tests/                    # protocol/native tests and portable golden fixtures
-  Installer/                # independent installer, starts in M3
+  Installer/                # direct-install EXE, authorized in the 0.1.2+3 delivery
   scripts/                  # dependency preparation/build/register/package
   README.md                 # exact build, recovery and manual verification
 ```
@@ -406,7 +406,27 @@ its old toolchain/instructions need current Windows verification.
 - [UI Automation text patterns cannot themselves write text](https://learn.microsoft.com/en-us/dotnet/framework/ui-automation/ui-automation-textpattern-overview)
 - [Pinned WinUI design/development skill](https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/winui-app)
 
-## Implementation Round Evidence
+## Public Windows Delivery Evidence (0.1.2+3)
+
+- Public Windows-only repository: https://github.com/Attiv/xmjd-windows. The owner
+  authorized direct installation and GitHub Release delivery on 2026-11-16.
+- Actual Windows/MSVC builds have passed for x64 and x86, including x64 CTest
+  4/4 and x86 CTest 3/3. Real librime/Lua/OpenCC deployment, candidate selection,
+  one-shot commit consumption, cancel/finalize, and simplified/traditional
+  conversion have passed on hosted Windows runners.
+- Windows PowerShell 5.1 assembled and verified both the package directory and
+  ZIP. COM exports use STDAPI and olectl.h; SDK TSF identifiers link through uuid,
+  not a nonexistent msctf.lib. The build detects VS 2022 and VS 2026 generators.
+- Inno Setup installer, actual install/uninstall, ordinary-user Host, and complete
+  corresponding-source attachment checks are CI release gates. Their final
+  results and the Release link are recorded below after completion.
+- Interactive Windows 11 TSF typing, application/DPI compatibility and measured
+  input latency still require owner acceptance. CI does not establish those.
+
+## Historical Source Handoff Evidence (0.1.1+2)
+
+The entries below describe the earlier macOS-only source handoff, before the
+public Windows build and installer round. Its pending statuses are historical.
 
 - This handoff retains the original research notes above for provenance; they do
   not constitute Windows build or runtime validation.

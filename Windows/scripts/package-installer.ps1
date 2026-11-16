@@ -84,20 +84,10 @@ if ($IsccPath) {
     if ([IO.Path]::GetFileName($IsccPath) -ine 'ISCC.exe' -or -not (Test-InnoCompiler $IsccPath)) {
         throw "IsccPath 必须指向完整的 Inno Setup $innoVersion 编译器目录中的 ISCC.exe。"
     }
-} else {
-    $candidates = @()
-    $command = Get-Command 'ISCC.exe' -CommandType Application -ErrorAction SilentlyContinue
-    if ($command) { $candidates += $command.Source }
-    foreach ($parent in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LOCALAPPDATA)) {
-        if ($parent) {
-            $relative = if ($parent -eq $env:LOCALAPPDATA) { 'Programs/Inno Setup 6/ISCC.exe' } else { 'Inno Setup 6/ISCC.exe' }
-            $candidates += Join-Path $parent $relative
-        }
-    }
-    foreach ($candidate in $candidates) {
-        if (Test-InnoCompiler $candidate) { $IsccPath = (Resolve-Path -LiteralPath $candidate).Path; break }
-    }
 }
+# Do not pick an arbitrary preinstalled Inno 6: /? exposes no patch version.
+# The default path always uses our exact hash-pinned bootstrap. Explicit
+# -IsccPath remains available and is checked by XMJD.iss's version assertion.
 
 $toolStaging = $null
 $releaseStaging = $null
