@@ -1,0 +1,76 @@
+{
+  "source": "https://github.com/rime/librime",
+  "version": "1.16.1",
+  "commit": "de4700e9f6b75b109910613df907965e3cbe0567",
+  "license": "BSD-3-Clause",
+  "abi": "Windows-MSVC-v143",
+  "plugins": {
+    "librime-lua": {
+      "source": "https://github.com/hchunhui/librime-lua",
+      "commit": "68f9c364a2d25a04c7d4794981d7c796b05ab627",
+      "license": "BSD-3-Clause",
+      "luaVersion": "5.4.8",
+      "versionEvidence": "Official engine version-info.txt: 68f9c36; rime.dll: $LuaVersion: Lua 5.4.8"
+    },
+    "librime-octagram": {
+      "commit": "dfcc15115788c828d9dd7b4bff68067d3ce2ffb8",
+      "license": "GPL-3.0"
+    },
+    "librime-predict": {
+      "commit": "920bd41ebf6f9bf6855d14fbe80212e54e749791",
+      "license": "BSD-3-Clause"
+    }
+  },
+  "nativeDependencies": {
+    "OpenCC": { "version": "1.1.9", "commit": "556ed22496d650bd0b13b6c163be9814637970ae", "license": "Apache-2.0" },
+    "glog": { "commit": "7b134a5c82c0c0b5698bb6bf7a835b230c5638e4", "license": "BSD-3-Clause" },
+    "leveldb": { "commit": "99b3c03b3284f5886f9ef9a4ef703d57373e61be", "license": "BSD-3-Clause" },
+    "marisa-trie": { "version": "0.3.1", "commit": "3e87d53b78e15f2f43783d5e376561a8c9722051", "license": "BSD-2-Clause OR LGPL-2.1-or-later" },
+    "yaml-cpp": { "commit": "2f86d13775d119edbb69af52e5f566fd65c6953b", "license": "MIT" },
+    "Boost": { "version": "1.89.0", "license": "BSL-1.0" },
+    "Lua": { "version": "5.4.8", "license": "MIT" }
+  },
+  "scheme": {
+    "path": "../xmjd/xmjd.zip",
+    "sha256": "bd7ba2a9763367a29f42e9a88bd330d5e6b99e6340e27b2919ead1f6885d546f"
+  },
+  "licenses": [
+    { "name": "librime-LICENSE", "url": "https://raw.githubusercontent.com/rime/librime/de4700e9f6b75b109910613df907965e3cbe0567/LICENSE", "sha256": "f67d27a6d2d586fcfed4b4c886a83747095396a39b6641e18e855086be2ec400" },
+    { "name": "librime-lua-LICENSE", "url": "https://raw.githubusercontent.com/hchunhui/librime-lua/68f9c364a2d25a04c7d4794981d7c796b05ab627/LICENSE", "sha256": "c6bd4f58b13ae9d45c5e53adddeea5049114a25862797c6c6f64920431eea249" },
+    { "name": "librime-octagram-LICENSE", "url": "https://raw.githubusercontent.com/lotem/librime-octagram/dfcc15115788c828d9dd7b4bff68067d3ce2ffb8/LICENSE", "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903" },
+    { "name": "librime-predict-LICENSE", "url": "https://raw.githubusercontent.com/rime/librime-predict/920bd41ebf6f9bf6855d14fbe80212e54e749791/LICENSE", "sha256": "9b1bbdf15a381884b47dfd9422e68f6382170b2841c476afc076f2d448c7a59f" },
+    { "name": "glog-COPYING", "url": "https://raw.githubusercontent.com/google/glog/7b134a5c82c0c0b5698bb6bf7a835b230c5638e4/COPYING", "sha256": "136d48dea7a681413691f3db3098f6cf5ffaa3119d96d97bb83b8cff3ce38c4a" },
+    { "name": "leveldb-LICENSE", "url": "https://raw.githubusercontent.com/google/leveldb/99b3c03b3284f5886f9ef9a4ef703d57373e61be/LICENSE", "sha256": "ccc19f1da0798ed666609b65a5b44dd8b3abe6fc08b9c0592eb76e82e174db19" },
+    { "name": "marisa-trie-COPYING.md", "url": "https://raw.githubusercontent.com/s-yata/marisa-trie/3e87d53b78e15f2f43783d5e376561a8c9722051/COPYING.md", "sha256": "edf58dab34c3dc239ba4ba2d5d3d844d8c5b442aa4dd1149fac81b2d8c6cb8d1" },
+    { "name": "OpenCC-LICENSE", "url": "https://raw.githubusercontent.com/BYVoid/OpenCC/556ed22496d650bd0b13b6c163be9814637970ae/LICENSE", "sha256": "b534e465949558eec2597b04f5092b5e161236a68dfbfd04d547592ac3964308" },
+    { "name": "yaml-cpp-LICENSE", "url": "https://raw.githubusercontent.com/jbeder/yaml-cpp/2f86d13775d119edbb69af52e5f566fd65c6953b/LICENSE", "sha256": "aa6fcc27be034e41e21dd832f9175bfe694a48491d9e14ff0fa278e19ad14f1b" },
+    { "name": "Lua-lua.h", "url": "https://raw.githubusercontent.com/lua/lua/6e22fedb74cf0c9b6656e9fce8b7331db847c605/lua.h", "sha256": "3b77329f9deed929a5cbe7a7d5fc81ebbb63fd869a49e0a9302fe9240caf1930" },
+    { "name": "Boost-LICENSE_1_0.txt", "url": "https://raw.githubusercontent.com/boostorg/boost/ef7fea34711a189472893b88205b1dd3c275677b/LICENSE_1_0.txt", "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566" }
+  ],
+  "architectures": {
+    "x64": {
+      "engine": {
+        "name": "rime-de4700e-Windows-msvc-x64.7z",
+        "url": "https://github.com/rime/librime/releases/download/1.16.1/rime-de4700e-Windows-msvc-x64.7z",
+        "sha256": "e17c1bb4acc9934669e7a62003aef3f8b56d0afa89e5d893ed7dbf34546abb6e"
+      },
+      "dependencies": {
+        "name": "rime-deps-de4700e-Windows-msvc-x64.7z",
+        "url": "https://github.com/rime/librime/releases/download/1.16.1/rime-deps-de4700e-Windows-msvc-x64.7z",
+        "sha256": "8ddfa46881a8f20c37fbbfdc3b9d0e9c5f7958f486cce4335a18be6ea8277af2"
+      }
+    },
+    "x86": {
+      "engine": {
+        "name": "rime-de4700e-Windows-msvc-x86.7z",
+        "url": "https://github.com/rime/librime/releases/download/1.16.1/rime-de4700e-Windows-msvc-x86.7z",
+        "sha256": "9c1873f81f19c6822bafab84246f5faa85476def4d89dca9b4c9f41ba144ac0e"
+      },
+      "dependencies": {
+        "name": "rime-deps-de4700e-Windows-msvc-x86.7z",
+        "url": "https://github.com/rime/librime/releases/download/1.16.1/rime-deps-de4700e-Windows-msvc-x86.7z",
+        "sha256": "8204777f295b1f57fd411d64dfc735ed5cc1a63e3c5b0735cdab33a28def81da"
+      }
+    }
+  }
+}
