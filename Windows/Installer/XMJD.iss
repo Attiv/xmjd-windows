@@ -257,7 +257,7 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  InstallDirectory: String;
+  InstallDirectory, PreviousVersion: String;
 begin
   Result := '';
   InstallDirectory := FixedInstallDirectory;
@@ -289,9 +289,15 @@ begin
     RegValueExists(HKLM64, 'Software\XMJD', 'HostExecutablePath') or
     RegValueExists(HKLM64, 'Software\XMJD', 'RegistrationComplete') or
     RegValueExists(HKLM64, StartupKey, 'XMJDHost') then
-    Result := 'An XMJD installation or partial registration already exists. Uninstall the previous XMJD version first; ' +
-      'your user data will be preserved. If it was installed manually, run that installation''s scripts\unregister.ps1 ' +
-      'as administrator before retrying.';
+  begin
+    if RegQueryStringValue(HKLM64, UninstallKey, 'DisplayVersion', PreviousVersion) then
+      Result := 'XMJD ' + PreviousVersion + ' is already installed. Open Settings > Apps > Installed apps, ' +
+        'uninstall XMJD, then run this installer again. Your user data will be preserved.'
+    else
+      Result := 'An XMJD installation or partial registration already exists. Uninstall the previous XMJD version first; ' +
+        'your user data will be preserved. If it was installed manually, run that installation''s scripts\unregister.ps1 ' +
+        'as administrator before retrying.';
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

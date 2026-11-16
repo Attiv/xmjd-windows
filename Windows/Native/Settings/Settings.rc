@@ -5,7 +5,7 @@
 IDD_SETTINGS DIALOGEX 0, 0, 352, 262
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "星猫键道设置"
-FONT 9, "Microsoft YaHei UI", 400, 0, 0x86
+FONT 9, "Microsoft YaHei UI", 400, 0, 1
 BEGIN
     ICON            1, IDC_APPICON, 14, 12, 20, 20
     LTEXT           "星猫键道 Windows", IDC_TITLE, 42, 12, 180, 12
