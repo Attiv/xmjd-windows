@@ -87,6 +87,10 @@ function Assert-PreparedPackage {
         'version-info.txt', 'share/opencc/s2t.json', 'share/opencc/STCharacters.ocd2', 'licenses/librime-LICENSE')) {
         if (-not $expected.ContainsKey($required)) { throw "Missing dependency file: $required" }
     }
+    foreach ($asset in $lock.dataAssets) {
+        $entry = $expected["share/rime-data/$($asset.name)"]
+        if (-not $entry -or $entry.sha256 -ne $asset.sha256) { throw "Data asset differs from lock: $($asset.name)" }
+    }
     foreach ($license in $lock.licenses) {
         $entry = $expected["licenses/$($license.name)"]
         if (-not $entry -or $entry.sha256 -ne $license.sha256) { throw "License differs from lock: $($license.name)" }
@@ -261,6 +265,10 @@ try {
     foreach ($license in $lock.licenses) {
         $cachedLicense = Get-VerifiedAsset $license (Join-Path $cacheRoot 'licenses')
         Copy-UniqueFile $cachedLicense (Join-Path $packageRoot "licenses/$($license.name)")
+    }
+    foreach ($asset in $lock.dataAssets) {
+        $cachedAsset = Get-VerifiedAsset $asset (Join-Path $cacheRoot 'data')
+        Copy-UniqueFile $cachedAsset (Join-Path $packageRoot "share/rime-data/$($asset.name)")
     }
     $marker = [ordered]@{
         formatVersion = 2

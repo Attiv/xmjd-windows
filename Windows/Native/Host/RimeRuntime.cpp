@@ -107,7 +107,7 @@ bool validateResourceTree(const std::filesystem::path& directory) {
     // A schema can load while a lazy Lua/OpenCC path is still missing. Reject
     // incomplete packages before publishing readiness, including on recovery.
     for (const auto* relative : {
-             L"xmjd6.schema.yaml", L"default.yaml", L"default.custom.yaml",
+             L"xmjd6.schema.yaml", L"default.yaml", L"default.custom.yaml", L"essay.txt",
              L"xmjd6.extended.dict.yaml", L"pinyin_simp.dict.yaml", L"liangfen.dict.yaml",
              L"lua/xmjd6_processor.lua", L"lua/xmjd6_opencc_filter.lua",
              L"lua/zzc/xmjd6_zzc_processor.lua", L"zzc_state/char_parts.tsv",

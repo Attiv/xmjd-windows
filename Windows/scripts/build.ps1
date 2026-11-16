@@ -61,7 +61,7 @@ function Get-ManifestFiles([object] $Manifest) {
     }
     foreach ($path in @('XMJDHost.exe', 'rime.dll', 'Tip/x64/XMJDTip.dll', 'Tip/x86/XMJDTip.dll',
         'librime.lock.json', 'xmjd-librime-lock.json', 'version-info.txt', 'VERSION',
-        'Resources/Rime/xmjd6.schema.yaml', 'Resources/Rime/default.yaml', 'Resources/Rime/default.custom.yaml',
+        'Resources/Rime/xmjd6.schema.yaml', 'Resources/Rime/default.yaml', 'Resources/Rime/default.custom.yaml', 'Resources/Rime/essay.txt',
         'Resources/Rime/opencc/s2t.json', 'Resources/Rime/opencc/STCharacters.ocd2',
         'share/opencc/s2t.json', 'licenses/librime-LICENSE', 'README.md', 'IMPLEMENTATION_PLAN.md',
         'LICENSE.txt', 'THIRD_PARTY_NOTICES.txt',

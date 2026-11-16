@@ -2,6 +2,7 @@
   "formatVersion": 1,
   "librimeCommit": "de4700e9f6b75b109910613df907965e3cbe0567",
   "repositories": [
+    { "id": "rime-essay", "path": "rime-essay", "source": "https://github.com/rime/rime-essay.git", "commit": "d95eeae056df429ecf993038c325a216f0b28c5b" },
     { "id": "librime", "path": "librime", "source": "https://github.com/rime/librime.git", "commit": "de4700e9f6b75b109910613df907965e3cbe0567", "lockKey": "commit" },
     { "id": "glog", "path": "librime/deps/glog", "parent": "librime", "submodulePath": "deps/glog", "source": "https://github.com/google/glog.git", "commit": "7b134a5c82c0c0b5698bb6bf7a835b230c5638e4", "lockKey": "nativeDependencies.glog.commit" },
     { "id": "googletest", "path": "librime/deps/googletest", "parent": "librime", "submodulePath": "deps/googletest", "source": "https://github.com/google/googletest.git", "commit": "f8d7d77c06936315286eb55f8de22cd23c188571" },

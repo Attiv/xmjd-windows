@@ -23,6 +23,11 @@ PROVENANCE.json 记录来源、提交、tree、文件 SHA-256 和两个架构的
 
 固定组件与许可证
 
+rime-essay — LGPL-3.0
+  d95eeae056df429ecf993038c325a216f0b28c5b
+  LiangFen 词典引用的预设词频表，原样提供 essay.txt。
+  完整许可：licenses/rime-essay-LICENSE；作者名单随对应源码保留。
+
 librime 1.16.1 — BSD-3-Clause
   de4700e9f6b75b109910613df907965e3cbe0567
   Copyright (c) 2014, RIME Developers. All rights reserved.

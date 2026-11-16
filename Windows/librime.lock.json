@@ -34,7 +34,11 @@
     "path": "../xmjd/xmjd.zip",
     "sha256": "bd7ba2a9763367a29f42e9a88bd330d5e6b99e6340e27b2919ead1f6885d546f"
   },
+  "dataAssets": [
+    { "name": "essay.txt", "url": "https://raw.githubusercontent.com/rime/rime-essay/d95eeae056df429ecf993038c325a216f0b28c5b/essay.txt", "sha256": "e7068093fad10a6d86b3a68f1067df474a01383b212bfa9836c6b99adac26ecb" }
+  ],
   "licenses": [
+    { "name": "rime-essay-LICENSE", "url": "https://raw.githubusercontent.com/rime/rime-essay/d95eeae056df429ecf993038c325a216f0b28c5b/LICENSE", "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768" },
     { "name": "librime-LICENSE", "url": "https://raw.githubusercontent.com/rime/librime/de4700e9f6b75b109910613df907965e3cbe0567/LICENSE", "sha256": "f67d27a6d2d586fcfed4b4c886a83747095396a39b6641e18e855086be2ec400" },
     { "name": "librime-lua-LICENSE", "url": "https://raw.githubusercontent.com/hchunhui/librime-lua/68f9c364a2d25a04c7d4794981d7c796b05ab627/LICENSE", "sha256": "c6bd4f58b13ae9d45c5e53adddeea5049114a25862797c6c6f64920431eea249" },
     { "name": "librime-octagram-LICENSE", "url": "https://raw.githubusercontent.com/lotem/librime-octagram/dfcc15115788c828d9dd7b4bff68067d3ce2ffb8/LICENSE", "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903" },
