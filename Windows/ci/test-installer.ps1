@@ -95,6 +95,12 @@ $settingsExe = Join-Path $installRoot 'XMJDSettings.exe'
 if (-not (Test-Path -LiteralPath $settingsExe -PathType Leaf)) { throw 'Missing XMJDSettings.exe.' }
 $settingsCheck = Start-Process -FilePath $settingsExe -ArgumentList '--check' -Wait -PassThru
 if ($settingsCheck.ExitCode -ne 0) { throw "Settings self-check failed: $($settingsCheck.ExitCode)" }
+$settingsUi = Start-Process -FilePath $settingsExe -ArgumentList '--self-test-ui' -PassThru
+if (-not $settingsUi.WaitForExit(15000)) {
+    $settingsUi.Kill()
+    throw 'Settings UI self-test timed out.'
+}
+if ($settingsUi.ExitCode -ne 0) { throw "Settings UI self-test failed: $($settingsUi.ExitCode)" }
 $settingsSelect = Start-Process -FilePath $settingsExe -ArgumentList '--select pinyin_simp' -Wait -PassThru
 if ($settingsSelect.ExitCode -ne 0) { throw "Settings scheme selection failed: $($settingsSelect.ExitCode)" }
 $settingsRoot = Join-Path $env:LOCALAPPDATA 'XMJD'
@@ -185,5 +191,5 @@ Assert-Registration $false
 if (Test-Path -LiteralPath (Join-Path $installRoot 'XMJDHost.exe')) { throw 'Program files survived a clean uninstall.' }
 if (Test-Path -LiteralPath (Join-Path $installRoot 'XMJDSettings.exe')) { throw 'Settings program survived a clean uninstall.' }
 if (Test-Path -LiteralPath $settingsShortcut) { throw 'Settings Start Menu shortcut survived uninstall.' }
-[IO.File]::WriteAllText((Join-Path $logRoot 'result.txt'), "PASS: silent install; x64/x86 COM; Host metadata; settings self-check and scheme persistence; Start Menu shortcut; repeat install rejected; repeat registration; mismatched ownership blocked uninstall and repair; missing x86 DLL blocked uninstall and retained remaining payload; /REPAIR restored manifest and dual-architecture registration; uninstall; repeat unregister; repair and uninstall preserved user data.`r`n")
+[IO.File]::WriteAllText((Join-Path $logRoot 'result.txt'), "PASS: silent install; x64/x86 COM; Host metadata; settings self-check, dialog self-test and scheme persistence; Start Menu shortcut; repeat install rejected; repeat registration; mismatched ownership blocked uninstall and repair; missing x86 DLL blocked uninstall and retained remaining payload; /REPAIR restored manifest and dual-architecture registration; uninstall; repeat unregister; repair and uninstall preserved user data.`r`n")
 Write-Output 'Installer integration checks passed.'

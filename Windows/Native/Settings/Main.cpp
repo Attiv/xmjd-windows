@@ -39,6 +39,7 @@ std::filesystem::path g_installDirectory;
 std::filesystem::path g_dataRoot;
 std::vector<SchemaInfo> g_schemas;
 bool g_busy = false;
+bool g_selfTest = false;
 
 void appendLog(const std::wstring& message);
 
@@ -609,8 +610,25 @@ INT_PTR CALLBACK settingsProc(HWND dialog, UINT message, WPARAM wParam, LPARAM l
                 EnableWindow(GetDlgItem(dialog, id), FALSE);
             }
         }
+        if (g_selfTest) {
+            for (const int id : {IDC_SCHEMA_LIST, IDC_APPLY, IDC_REDEPLOY, IDC_START_HOST,
+                                 IDC_OPEN_USER, IDC_OPEN_LOG, IDC_OPEN_LANGUAGE, IDC_STATUS}) {
+                if (!GetDlgItem(dialog, id)) {
+                    EndDialog(dialog, 0);
+                    return TRUE;
+                }
+            }
+            SetTimer(dialog, 1, 300, nullptr);
+        }
         return TRUE;
     }
+    case WM_TIMER:
+        if (g_selfTest && wParam == 1) {
+            KillTimer(dialog, 1);
+            EndDialog(dialog, 1);
+            return TRUE;
+        }
+        return FALSE;
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDC_APPLY: applySelection(); return TRUE;
@@ -668,6 +686,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         result = runCheck();
     } else if (argc >= 3 && _wcsicmp(argv[1], L"--select") == 0) {
         result = runSelect(xmjd::win::narrow(argv[2]));
+    } else if (argc >= 2 && _wcsicmp(argv[1], L"--self-test-ui") == 0) {
+        g_selfTest = true;
     }
     LocalFree(argv);
     if (result >= 0) return result;
@@ -680,5 +700,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     INITCOMMONCONTROLSEX controls{static_cast<DWORD>(sizeof(controls)), ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&controls);
     const INT_PTR dialogResult = DialogBoxParamW(instance, MAKEINTRESOURCEW(IDD_SETTINGS), nullptr, settingsProc, 0);
+    if (g_selfTest) return dialogResult == 1 ? 0 : 1;
     return dialogResult == -1 ? 1 : 0;
 }
