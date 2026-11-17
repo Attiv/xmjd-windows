@@ -21,6 +21,10 @@
 #include <utility>
 
 #include "Tip.h"
+#include "LangBarItem.h"
+#include <shellapi.h>
+
+#include <cstring>
 #include "CandidateRenderer.h"
 
 namespace xmjd::tip {
@@ -102,6 +106,89 @@ std::wstring modulePath() {
 }
 
 // 候选窗失败的诊断日志：最多每秒一行，正常输入时几乎没有开销。
+std::string foregroundProcessName() {
+    static std::string cached;
+    static DWORD cachedThread = 0;
+    const DWORD thread = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+    if (thread == cachedThread && !cached.empty()) return cached;
+    cachedThread = thread;
+    cached.clear();
+    const HWND focus = GetForegroundWindow();
+    if (!focus) return cached;
+    DWORD processId = 0;
+    GetWindowThreadProcessId(focus, &processId);
+    if (processId == 0) return cached;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!process) return cached;
+    wchar_t path[1024]{};
+    DWORD size = static_cast<DWORD>(std::size(path));
+    if (QueryFullProcessImageNameW(process, 0, path, &size) && size > 0) {
+        const std::wstring full(path, size);
+        const auto slash = full.find_last_of(L"\\");
+        cached = xmjd::win::narrow(slash == std::wstring::npos ? full : full.substr(slash + 1));
+    }
+    CloseHandle(process);
+    return cached;
+}
+
+// 不带限流的诊断行：只有"被谁加载了"这种一次性事件才用它。
+// 按键级诊断：只有 Logs\keys.debug 存在时才写，且只记录"是否处理/提交了几个字"，
+// 不记录具体按了什么键。用于回答"这个应用里按键到底发生了什么"。
+void logKeyOutcome(unsigned keycode, bool handled, std::size_t commit, std::size_t preedit, std::size_t input, bool ascii) {
+    const auto root = xmjd::win::dataRoot();
+    if (root.empty()) return;
+    const auto marker = root / L"Logs" / L"keys.debug";
+    std::error_code ec;
+    if (!std::filesystem::exists(marker, ec)) return;
+    std::ofstream stream(root / L"Logs" / L"keys.log", std::ios::app | std::ios::binary);
+    if (!stream) return;
+    SYSTEMTIME time{};
+    GetLocalTime(&time);
+    const char* cls = (keycode >= 'a' && keycode <= 'z') || (keycode >= 'A' && keycode <= 'Z')
+        ? "letter"
+        : ((keycode >= '0' && keycode <= '9') ? "digit" : (keycode >= 0xffe1 ? "modifier" : "other"));
+    char line[200]{};
+    // commit/preedit 记的是 UTF-8 字节数，汉字一字 3 字节，读日志时按此换算。
+    std::snprintf(line, sizeof(line), "%02u:%02u:%02u [%s] %s handled=%d commit=%zuB preedit=%zuB input=%zuB ascii=%d\n",
+                  static_cast<unsigned>(time.wHour), static_cast<unsigned>(time.wMinute),
+                  static_cast<unsigned>(time.wSecond),
+                  foregroundProcessName().c_str(), cls, handled ? 1 : 0, commit, preedit, input, ascii ? 1 : 0);
+    stream << line;
+}
+
+// 语言栏按钮点击后打开设置程序。DLL 位于 <安装目录>\Tip\x64\ 下。
+void openSettingsFromTip() {
+    const std::wstring dll = modulePath();
+    if (dll.empty()) return;
+    std::filesystem::path directory(dll);
+    for (int level = 0; level < 3; ++level) directory = directory.parent_path();
+    std::error_code ec;
+    const auto executable = directory / L"XMJDSettings.exe";
+    if (!std::filesystem::is_regular_file(executable, ec)) return;
+    ShellExecuteW(nullptr, L"open", executable.c_str(), nullptr, directory.c_str(), SW_SHOWNORMAL);
+}
+
+void logTipEvent(const char* stage) {
+    const auto root = xmjd::win::dataRoot();
+    if (root.empty()) return;
+    const auto directory = root / L"Logs";
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec) return;
+    std::ofstream stream(directory / L"tip.log", std::ios::app | std::ios::binary);
+    if (!stream) return;
+    SYSTEMTIME time{};
+    GetLocalTime(&time);
+    const std::string host = foregroundProcessName();
+    char stamp[80]{};
+    std::snprintf(stamp, sizeof(stamp), "%04u-%02u-%02u %02u:%02u:%02u [%s] ",
+                  static_cast<unsigned>(time.wYear), static_cast<unsigned>(time.wMonth),
+                  static_cast<unsigned>(time.wDay), static_cast<unsigned>(time.wHour),
+                  static_cast<unsigned>(time.wMinute), static_cast<unsigned>(time.wSecond),
+                  host.empty() ? "?" : host.c_str());
+    stream << stamp << stage << '\n';
+}
+
 void logCandidateStage(const char* stage) {
     static std::atomic<ULONGLONG> lastWrite{0};
     const ULONGLONG now = GetTickCount64();
@@ -123,7 +210,9 @@ void logCandidateStage(const char* stage) {
                   static_cast<unsigned>(time.wYear), static_cast<unsigned>(time.wMonth),
                   static_cast<unsigned>(time.wDay), static_cast<unsigned>(time.wHour),
                   static_cast<unsigned>(time.wMinute), static_cast<unsigned>(time.wSecond));
-    stream << stamp << stage << '\n';
+    // 带上宿主进程名："某个应用里不工作"这类问题不用再靠猜。
+    const std::string host = foregroundProcessName();
+    stream << stamp << '[' << (host.empty() ? "?" : host.c_str()) << "] " << stage << '\n';
 }
 
 bool readHostExecutable(std::wstring& executable) {
@@ -343,6 +432,7 @@ HRESULT STDMETHODCALLTYPE XMJDTip::Activate(ITfThreadMgr* manager, TfClientId cl
 HRESULT STDMETHODCALLTYPE XMJDTip::ActivateEx(ITfThreadMgr* manager, TfClientId clientId, DWORD flags) {
     if (!manager) return E_INVALIDARG;
     if (activated_) return TF_E_ALREADY_EXISTS;
+    logTipEvent("activate");
     try {
         threadManager_ = manager;
         threadManager_->AddRef();
@@ -360,9 +450,11 @@ HRESULT STDMETHODCALLTYPE XMJDTip::ActivateEx(ITfThreadMgr* manager, TfClientId 
         hr = keystrokeManager_->AdviseKeyEventSink(clientId_, this, TRUE);
         if (FAILED(hr)) { deactivate(); return hr; }
         keySinkAdvised_ = true;
+        logTipEvent("activate-key-sink-ok");
+        logTipEvent("activate-query-ok");
         hr = threadSource_->AdviseSink(IID_ITfThreadMgrEventSink,
                                        static_cast<ITfThreadMgrEventSink*>(this), &threadSinkCookie_);
-        if (FAILED(hr)) { deactivate(); return hr; }
+        if (FAILED(hr)) { logTipEvent("activate-fail thread-sink"); deactivate(); return hr; }
         hr = threadSource_->AdviseSink(IID_ITfInputProcessorProfileActivationSink,
                                        static_cast<ITfInputProcessorProfileActivationSink*>(this), &profileSinkCookie_);
         if (FAILED(hr)) { deactivate(); return hr; }
@@ -377,6 +469,8 @@ HRESULT STDMETHODCALLTYPE XMJDTip::ActivateEx(ITfThreadMgr* manager, TfClientId 
             releaseInterface(focusedDocument);
             if (contextReady) scheduleEngineRetry();
         }
+        createLangBarItem();
+        logTipEvent("activate-ok");
         return S_OK;
     } catch (...) {
         deactivate();
@@ -388,7 +482,43 @@ HRESULT STDMETHODCALLTYPE XMJDTip::Deactivate() {
     return S_OK;
 }
 
+void XMJDTip::createLangBarItem() {
+    if (langBarItem_ || !threadManager_) return;
+    ITfLangBarItemMgr* manager = nullptr;
+    if (FAILED(threadManager_->QueryInterface(IID_PPV_ARGS(&manager))) || !manager) return;
+    auto* item = new (std::nothrow) LangBarItem(GetModuleHandleW(L"XMJDTip.dll"), kTipClsid, openSettingsFromTip);
+    if (!item) {
+        manager->Release();
+        return;
+    }
+    if (FAILED(manager->AddItem(item))) {
+        // 加不上不算致命：输入法本身照常工作，只是没有语言栏按钮。
+        item->Release();
+        manager->Release();
+        logTipEvent("langbar-add-failed");
+        return;
+    }
+    langBarManager_ = manager;
+    langBarItem_ = item;
+    logTipEvent("langbar-added");
+}
+
+void XMJDTip::destroyLangBarItem() {
+    if (langBarManager_ && langBarItem_) {
+        langBarManager_->RemoveItem(static_cast<ITfLangBarItem*>(langBarItem_));
+    }
+    if (langBarItem_) {
+        langBarItem_->Release();
+        langBarItem_ = nullptr;
+    }
+    if (langBarManager_) {
+        langBarManager_->Release();
+        langBarManager_ = nullptr;
+    }
+}
+
 void XMJDTip::deactivate() noexcept {
+    destroyLangBarItem();
     foreground_ = false;
     cancelEngineRetry();
     resetForFocusChange();
@@ -639,6 +769,10 @@ bool XMJDTip::startComposition(EditSession* edit, TfEditCookie cookie) {
         return false;
     }
     composition_ = started;
+    // 新组合真的建立起来之后才需要重新 BeginUIElement。放在这里而不是 endComposition：
+    // 后者在取消、外部终止时也会走到，反复重挂会让 Chromium 判定组合失效，
+    // 表现为整个输入法在那边失灵。
+    uiElementAttempted_ = false;
     return true;
 }
 
@@ -675,20 +809,19 @@ bool XMJDTip::setCompositionText(EditSession* edit, TfEditCookie cookie, std::ws
 }
 
 bool XMJDTip::commitText(EditSession* edit, TfEditCookie cookie, std::wstring_view text) {
-    if (!isValidEdit(edit)) return false;
+    if (!isValidEdit(edit)) {
+        logTipEvent("insert-fail edit-invalid");
+        return false;
+    }
     if (text.empty()) return true;
     ComPtr<ITfContext> target = edit->context_;
     const wchar_t* value = text.data();
     if (composition_) {
-        ComPtr<ITfComposition> active = composition_;
-        ITfRange* range = nullptr;
-        if (FAILED(active->GetRange(&range)) || !range) return false;
-        const HRESULT hr = isValidEdit(edit)
-            ? range->SetText(cookie, 0, value, static_cast<LONG>(text.size())) : TF_E_DISCONNECTED;
-        range->Release();
-        if (FAILED(hr)) return false;
-        if (!isValidEdit(edit) || active.Get() != composition_) return true;
-        return endComposition(edit, cookie, false);
+        // 先把组合串就地清掉再按普通文本插入。Chromium 系应用（Electron/Chrome）
+        // 对"改写组合串内容后立刻结束组合"处理不稳，会把要提交的字丢掉——
+        // 顶功时"提交 + 开新组合"正好是那个形状，所以只在那类应用里吞字。
+        if (!endComposition(edit, cookie, true)) return false;
+        if (!isValidEdit(edit)) return false;
     }
     ComPtr<ITfInsertAtSelection> insertion;
     HRESULT hr = target->QueryInterface(IID_PPV_ARGS(insertion.GetAddressOf()));
@@ -728,8 +861,35 @@ bool XMJDTip::endComposition(EditSession* edit, TfEditCookie cookie, bool eraseT
     return SUCCEEDED(hr);
 }
 
+// 把自己的中英状态写到用户目录，由 Host 的托盘图标显示 中/英。
+// 注意：不要写 GUID_COMPARTMENT_KEYBOARD_OPENCLOSE —— 把它置 0 等于向 TSF 宣布
+// "输入法已关闭"，框架从此不再把按键交给我们，Shift 也切不回来（0.1.5+9 的教训）。
+void XMJDTip::reportImeMode(bool asciiMode) {
+    if (asciiModeKnown_ && asciiMode == lastAsciiMode_) return;
+    asciiModeKnown_ = true;
+    lastAsciiMode_ = asciiMode;
+    asciiMode_ = asciiMode;
+    const auto root = xmjd::win::dataRoot();
+    if (root.empty()) return;
+    std::error_code ec;
+    const auto directory = root / L"UserData";
+    std::filesystem::create_directories(directory, ec);
+    const auto path = directory / L"ime-mode";
+    const auto temporary = path.wstring() + L".tmp";
+    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    const char* text = asciiMode ? "en\n" : "cn\n";
+    const DWORD bytes = static_cast<DWORD>(std::strlen(text));
+    DWORD written = 0;
+    const bool ok = WriteFile(file, text, bytes, &written, nullptr) != FALSE;
+    CloseHandle(file);
+    if (ok) MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+
 bool XMJDTip::applySnapshot(EditSession* edit, TfEditCookie cookie, const Snapshot& snapshot) {
     if (!isValidEdit(edit)) return false;
+    reportImeMode(snapshot.asciiMode);
     if (!snapshot.commitText.empty()) {
         const std::u16string utf16 = utf8ToUtf16(snapshot.commitText);
         if (!validUtf8(snapshot.commitText) || !commitText(edit, cookie, std::wstring_view(reinterpret_cast<const wchar_t*>(utf16.data()), utf16.size()))) return false;
@@ -1045,6 +1205,8 @@ HRESULT XMJDTip::process(EditSession* edit, TfEditCookie cookie) {
             return S_OK;
         }
         if (!isValidEdit(edit)) return TF_E_DISCONNECTED;
+        logKeyOutcome(edit->keycode_, response.handled != 0, response.snapshot.commitText.size(),
+                      response.snapshot.preedit.size(), response.snapshot.rawInput.size(), asciiMode_);
         if (!response.handled) {
             if (!applySnapshot(edit, cookie, response.snapshot)) {
                 failEngineSession(edit, cookie);
@@ -1089,7 +1251,10 @@ UINT XMJDTip::rimeModifiers() const {
 }
 
 bool XMJDTip::shouldTestKey(UINT key, bool keyUp) const {
-    if (key == VK_CAPITAL) return keyUp ? capsKeyDown_ : !capsKeyDown_;
+    if (key == VK_CAPITAL) {
+        if (asciiMode_) return false;   // 英文模式下 CapsLock 归应用
+        return keyUp ? capsKeyDown_ : !capsKeyDown_;
+    }
     const bool modifier = key == VK_SHIFT || key == VK_LSHIFT || key == VK_RSHIFT ||
         key == VK_CONTROL || key == VK_LCONTROL || key == VK_RCONTROL ||
         key == VK_MENU || key == VK_LMENU || key == VK_RMENU || key == VK_LWIN || key == VK_RWIN;
@@ -1102,13 +1267,20 @@ bool XMJDTip::shouldTestKey(UINT key, bool keyUp) const {
     // Preserve ordinary shortcuts; expose the scheme's Control+grave switcher.
     if (windowsKey || ((control || alt) && !altGr && !(control && !alt && key == VK_OEM_3))) return false;
     if (key >= VK_F1 && key <= VK_F24) return true;
+    // 英文模式下一个按键都不接管：字母、标点、数字全部原样交给应用。
+    // 让引擎把英文字母攒进组合串再提交，只在 TSF 原生应用里看得见；IMM32 类
+    // 应用（Notepad4、Notepad++、部分游戏）显示不了组合串，表现就是"打不出英文"。
+    if (asciiMode_) return false;
     const bool composing = composition_ != nullptr || (candidateElement_ && !candidateElement_->snapshot().values.empty());
     if (key == VK_ESCAPE || key == VK_BACK || key == VK_DELETE || key == VK_RETURN || key == VK_SPACE || key == VK_TAB ||
         key == VK_LEFT || key == VK_RIGHT || key == VK_UP || key == VK_DOWN || key == VK_PRIOR || key == VK_NEXT || key == VK_HOME || key == VK_END) {
         return composing;
     }
-    const bool printable = (key >= '0' && key <= '9') || (key >= 'A' && key <= 'Z') ||
-        (key >= VK_NUMPAD0 && key <= VK_DIVIDE) || (key >= VK_OEM_1 && key <= VK_OEM_102);
+    // 数字只有在候选列表开着时才是选词键。以前这里无条件认领，导致游戏、模拟器这类
+    // 自己处理键盘的应用里数字被吃掉、又没东西上屏。
+    if ((key >= '0' && key <= '9') || (key >= VK_NUMPAD0 && key <= VK_NUMPAD9)) return composing;
+    const bool printable = (key >= 'A' && key <= 'Z') || (key >= VK_OEM_1 && key <= VK_OEM_102) ||
+                           (key >= VK_MULTIPLY && key <= VK_DIVIDE);
     return printable && !keyUp;
 }
 

@@ -369,6 +369,10 @@ if(XMJD_ARCH STREQUAL "x64")
     Native/Host/Main.cpp
     Native/Host/RimeRuntime.cpp
     "${XMJD_GENERATED_DIR}/HostVersion.rc")
+  # GUI 子系统：登录时由 Run 键拉起不会再闪一个控制台窗口。
+  # 入口仍用 wmain（wmainCRTStartup），从终端调用时 AttachConsole 到父进程，
+  # --deploy/--probe/--health 的输出照常可见。
+  target_link_options(XMJDHost PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup)
   target_include_directories(XMJDHost PRIVATE "${XMJD_RIME_INCLUDE_DIR}" "${XMJD_GENERATED_DIR}")
   target_link_libraries(XMJDHost PRIVATE xmjd_windows_common ole32 advapi32 shell32)
   add_custom_command(TARGET XMJDHost POST_BUILD

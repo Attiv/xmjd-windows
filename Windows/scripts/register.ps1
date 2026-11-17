@@ -111,5 +111,12 @@ try {
     $baseKey.Dispose()
 }
 
+# 打包应用（系统搜索、设置、商店应用）是 AppContainer 进程，只能加载带
+# ALL APPLICATION PACKAGES 读权限的 DLL；Program Files 默认没有这一条。
+& "$env:SystemRoot\System32\icacls.exe" $root '/grant' '*S-1-15-2-1:(OI)(CI)(RX)' '/T' '/Q' | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning 'Could not grant packaged-app read access; the IME will not work inside SearchHost or Store apps.'
+}
+
 Write-Output 'XMJD x64/x86 TIP registration completed. Select XMJD manually in Windows Settings.'
 Write-Output 'The Host starts at next logon, or asynchronously when the TIP activates. The default input method was not changed.'

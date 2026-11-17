@@ -19,15 +19,20 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Test account is elevated.' }
 if ([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'Test requires an interactive nonzero Windows session.' }
-$deploy = & $HostPath --deploy 2>&1
-if ($LASTEXITCODE -ne 0 -or ($deploy -join "`n") -notmatch 'deploy-ok') { throw "Host deployment failed: $deploy" }
+# Host 是 GUI 子系统，PowerShell 的 & 不会等待它，必须显式等待并重定向输出。
+$deployOut = Join-Path (Split-Path -Parent $ResultPath) 'host-deploy.out'
+$deployProcess = Start-Process -FilePath $HostPath -ArgumentList '--deploy' -Wait -PassThru -NoNewWindow -RedirectStandardOutput $deployOut -RedirectStandardError ($deployOut + '.err')
+$deploy = (Get-Content -LiteralPath $deployOut -Raw -ErrorAction SilentlyContinue)
+if ($deployProcess.ExitCode -ne 0 -or $deploy -notmatch 'deploy-ok') { throw "Host deployment failed: $deploy" }
 $hostProcess = Start-Process -FilePath $HostPath -PassThru -WindowStyle Hidden
 try {
     # Initialization has already completed. Waiting on the process with a bounded
     # timeout allows startup without a retry/sleep loop.
     if ($hostProcess.WaitForExit(2000)) { throw "Host exited early: $($hostProcess.ExitCode)" }
-    $health = & $HostPath --health 2>&1
-    if ($LASTEXITCODE -ne 0 -or ($health -join "`n").Trim() -ne 'ok') { throw "Host health failed: $health" }
+    $healthOut = Join-Path (Split-Path -Parent $ResultPath) 'host-health.out'
+    $healthProcess = Start-Process -FilePath $HostPath -ArgumentList '--health' -Wait -PassThru -NoNewWindow -RedirectStandardOutput $healthOut -RedirectStandardError ($healthOut + '.err')
+    $health = (Get-Content -LiteralPath $healthOut -Raw -ErrorAction SilentlyContinue)
+    if ($healthProcess.ExitCode -ne 0 -or $health.Trim() -ne 'ok') { throw "Host health failed: $health" }
     [IO.File]::WriteAllText($ResultPath, "PASS: ordinary non-admin interactive user; real deployment; Host startup; authenticated pipe health.`r`n")
 } finally {
     # This is the test's own disposable Host, never an editor or unrelated app.

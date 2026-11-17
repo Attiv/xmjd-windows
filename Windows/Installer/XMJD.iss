@@ -59,6 +59,10 @@ Name: "{autoprograms}\星猫键道\星猫键道设置"; Filename: "{app}\XMJDSet
 Name: "{autoprograms}\星猫键道\卸载星猫键道"; Filename: "{uninstallexe}"
 
 [Run]
+; 打包应用（系统搜索 SearchHost、设置、商店应用）跑在 AppContainer 里，
+; 只能加载带 ALL APPLICATION PACKAGES 读权限的 DLL。Program Files 默认没有这条，
+; 不补的话 TSF 组件在那些进程里根本加载不起来。
+Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /grant *S-1-15-2-1:(OI)(CI)(RX) /T /Q"; Flags: runhidden waituntilterminated
 Filename: "{app}\XMJDSettings.exe"; Description: "打开星猫键道设置并选择输入方案"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [Messages]

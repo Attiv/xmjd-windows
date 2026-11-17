@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <functional>
@@ -17,8 +18,11 @@
 #include <utility>
 #include <vector>
 #include <windows.h>
-// WIN32_LEAN_AND_MEAN 会把 shellapi 排除在 windows.h 之外，托盘图标需要它。
+// WIN32_LEAN_AND_MEAN 会把 shellapi / objidl 排除在 windows.h 之外；
+// 托盘图标和 GDI+ 画的中英图标分别需要它们。
 #include <shellapi.h>
+#include <objidl.h>
+#include <gdiplus.h>
 #include <sddl.h>
 
 static_assert(sizeof(void*) == 8, "XMJDHost 只支持 x64 构建");
@@ -467,9 +471,77 @@ constexpr UINT kTrayMenuUserData = 2;
 constexpr UINT kTrayMenuLogs = 3;
 constexpr UINT kTrayMenuQuit = 4;
 constexpr wchar_t kTrayWindowClass[] = L"XMJDHostTray";
+constexpr UINT_PTR kTrayModeTimer = 1;
 
 NOTIFYICONDATAW g_trayIcon{};
 HWND g_trayWindow = nullptr;
+HICON g_ownedModeIcon = nullptr;
+int g_modeState = -1;   // -1 未知，0 英文，1 中文
+ULONG_PTR g_gdiplusToken = 0;
+
+// 托盘图标的 中/英 两态是运行时画出来的：32px 圆底 + 一个汉字。
+HICON makeModeIcon(const wchar_t* glyph, COLORREF background) {
+    if (g_gdiplusToken == 0) {
+        Gdiplus::GdiplusStartupInput input;
+        if (Gdiplus::GdiplusStartup(&g_gdiplusToken, &input, nullptr) != Gdiplus::Ok) return nullptr;
+    }
+    const int size = 32;
+    Gdiplus::Bitmap bitmap(size, size, PixelFormat32bppARGB);
+    {
+        Gdiplus::Graphics graphics(&bitmap);
+        graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+        graphics.Clear(Gdiplus::Color(0, 0, 0, 0));
+        Gdiplus::SolidBrush circle(Gdiplus::Color(255, GetRValue(background), GetGValue(background),
+                                                 GetBValue(background)));
+        graphics.FillEllipse(&circle, 1, 1, size - 2, size - 2);
+        Gdiplus::Font font(L"Microsoft YaHei UI", 17, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+        Gdiplus::SolidBrush text(Gdiplus::Color(255, 255, 255, 255));
+        Gdiplus::StringFormat format;
+        format.SetAlignment(Gdiplus::StringAlignmentCenter);
+        format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        graphics.DrawString(glyph, -1, &font, Gdiplus::RectF(0, -1, static_cast<Gdiplus::REAL>(size),
+                                                              static_cast<Gdiplus::REAL>(size)),
+                            &format, &text);
+    }
+    HICON icon = nullptr;
+    bitmap.GetHICON(&icon);
+    return icon;
+}
+
+void refreshTrayModeIcon() {
+    if (!g_trayWindow) return;
+    int state = -1;
+    const auto root = xmjd::win::dataRoot();
+    if (!root.empty()) {
+        std::ifstream stream(root / L"UserData" / L"ime-mode", std::ios::binary);
+        std::string value;
+        if (stream && std::getline(stream, value)) {
+            if (value == "en") state = 0;
+            else if (value == "cn") state = 1;
+        }
+    }
+    if (state == g_modeState) return;
+    g_modeState = state;
+    HICON icon = nullptr;
+    const wchar_t* tip = L"星猫键道 · 右键打开设置";
+    if (state == 1) {
+        icon = makeModeIcon(L"中", RGB(0xFF, 0x6B, 0x35));
+        tip = L"星猫键道 · 中文";
+    } else if (state == 0) {
+        icon = makeModeIcon(L"英", RGB(0x4A, 0x55, 0x68));
+        tip = L"星猫键道 · 英文";
+    } else {
+        icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
+    }
+    if (!icon) return;
+    if (g_ownedModeIcon && g_ownedModeIcon != icon) DestroyIcon(g_ownedModeIcon);
+    g_ownedModeIcon = state >= 0 ? icon : nullptr;   // 模块图标不归我们释放
+    g_trayIcon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_trayIcon.hIcon = icon;
+    wcscpy_s(g_trayIcon.szTip, tip);
+    Shell_NotifyIconW(NIM_MODIFY, &g_trayIcon);
+}
 
 std::filesystem::path installDirectory() {
     const auto module = xmjd::win::modulePath();
@@ -536,6 +608,10 @@ LRESULT CALLBACK trayWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             return 0;
         }
     }
+    if (message == WM_TIMER && wParam == kTrayModeTimer) {
+        refreshTrayModeIcon();
+        return 0;
+    }
     if (message == taskbarCreated && taskbarCreated != 0) {
         // 资源管理器重启后图标会消失，收到广播就重新挂上。
         if (g_trayIcon.cbSize != 0) Shell_NotifyIconW(NIM_ADD, &g_trayIcon);
@@ -564,10 +640,19 @@ bool addTrayIcon(HWND window) {
     g_trayIcon.hIcon = LoadIconW(cls.hInstance, MAKEINTRESOURCEW(1));
     if (!g_trayIcon.hIcon) g_trayIcon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     wcscpy_s(g_trayIcon.szTip, L"星猫键道 · 右键打开设置");
-    return Shell_NotifyIconW(NIM_ADD, &g_trayIcon) != FALSE;
+    if (!Shell_NotifyIconW(NIM_ADD, &g_trayIcon)) return false;
+    refreshTrayModeIcon();
+    // 中英状态由 Tip 写进 UserData\ime-mode，这里轻量轮询即可（700ms，一次文件读）。
+    SetTimer(g_trayWindow, kTrayModeTimer, 700, nullptr);
+    return true;
 }
 
 void removeTrayIcon() {
+    if (g_trayWindow) KillTimer(g_trayWindow, kTrayModeTimer);
+    if (g_ownedModeIcon) {
+        DestroyIcon(g_ownedModeIcon);
+        g_ownedModeIcon = nullptr;
+    }
     if (g_trayIcon.cbSize != 0) {
         Shell_NotifyIconW(NIM_DELETE, &g_trayIcon);
         g_trayIcon.cbSize = 0;
@@ -712,6 +797,19 @@ int runHost(int argc, wchar_t** argv) {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    // GUI 子系统不分配控制台；只有从终端启动时才借用父进程的那个，
+    // 这样诊断命令的输出还在，登录自启也不会闪窗口。
+    // 注意：stdout 已经被重定向成管道/文件时不能抢，否则 --probe 这类
+    // "… | head" 的调用会一个字都拿不到。
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+        const DWORD type = out ? GetFileType(out) : FILE_TYPE_UNKNOWN;
+        if (type != FILE_TYPE_PIPE && type != FILE_TYPE_DISK) {
+            FILE* stream = nullptr;
+            freopen_s(&stream, "CONOUT$", "w", stdout);
+            freopen_s(&stream, "CONOUT$", "w", stderr);
+        }
+    }
     hideOwnedConsoleWindow();
     if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)) {
         std::cerr << "runtime-error 18\n";

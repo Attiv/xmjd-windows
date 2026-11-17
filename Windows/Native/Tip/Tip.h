@@ -39,6 +39,7 @@ struct CandidateSnapshot {
 enum class EditAction { ProcessKey, SelectCandidate, FinalizeRaw, FinalizeConverted, Cancel, CancelComposition, RecoverComposition, UpdateCandidatePosition };
 
 class XMJDTip;
+class LangBarItem;
 
 class CandidateElement final : public ITfCandidateListUIElement {
 public:
@@ -155,6 +156,11 @@ private:
     bool endComposition(EditSession* edit, TfEditCookie cookie, bool eraseText);
     bool startComposition(EditSession* edit, TfEditCookie cookie);
     void updateCandidateUi(const xmjd::Snapshot& snapshot, TfEditCookie cookie);
+    // 把中英状态写到 UserData\ime-mode，Host 据此切换托盘图标。
+    void reportImeMode(bool asciiMode);
+    // 语言栏按钮：让 Windows 把本输入法当"正规 IME"，输入指示器里也有位置。
+    void createLangBarItem();
+    void destroyLangBarItem();
     void closeCandidateUi() noexcept;
     bool positionCandidateWindow(TfEditCookie cookie);
     bool showCandidateWindow(bool show);
@@ -170,6 +176,8 @@ private:
 
     std::atomic<ULONG> refs_{1};
     ITfThreadMgr* threadManager_ = nullptr;
+    ITfLangBarItemMgr* langBarManager_ = nullptr;
+    LangBarItem* langBarItem_ = nullptr;
     ITfKeystrokeMgr* keystrokeManager_ = nullptr;
     ITfUIElementMgr* uiElementManager_ = nullptr;
     ITfSource* threadSource_ = nullptr;
@@ -179,6 +187,9 @@ private:
     CandidateElement* candidateElement_ = nullptr;
     xmjd::win::PipeClient pipe_;
     TfClientId clientId_ = TF_CLIENTID_NULL;
+    bool asciiMode_ = false;          // 引擎当前的英文模式
+    bool asciiModeKnown_ = false;
+    bool lastAsciiMode_ = false;
     DWORD uiElementId_ = TF_INVALID_UIELEMENTID;
     DWORD activationFlags_ = 0;
     DWORD profileSinkCookie_ = TF_INVALID_COOKIE;

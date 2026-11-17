@@ -119,10 +119,18 @@ PSID sidPointer(const std::vector<std::uint8_t>& bytes) noexcept {
 }
 
 bool sameTokenBoundary(const TokenDetails& left, const TokenDetails& right) {
-    return !left.restricted && !right.restricted && !left.appContainer && !right.appContainer &&
-           left.integrity >= SECURITY_MANDATORY_MEDIUM_RID && right.integrity >= SECURITY_MANDATORY_MEDIUM_RID &&
-           left.integrity == right.integrity && left.session == right.session &&
-           EqualSid(sidPointer(left.user), sidPointer(right.user)) && EqualSid(sidPointer(left.logon), sidPointer(right.logon));
+    // 受限令牌一律拒绝；会话、用户、登录 SID 必须一致。
+    if (left.restricted || right.restricted) return false;
+    if (left.session != right.session) return false;
+    if (!EqualSid(sidPointer(left.user), sidPointer(right.user))) return false;
+    if (!EqualSid(sidPointer(left.logon), sidPointer(right.logon))) return false;
+    // 打包应用（SearchHost、设置、商店应用）跑在 AppContainer 里，完整性级别天生低于
+    // 桌面进程，拿不到 Medium。这类客户端只能靠"同一用户 + 同一登录会话"来界定，
+    // 否则系统搜索框、WinUI 应用里根本无法使用本输入法。
+    if (left.appContainer || right.appContainer) return true;
+    return left.integrity >= SECURITY_MANDATORY_MEDIUM_RID &&
+           right.integrity >= SECURITY_MANDATORY_MEDIUM_RID &&
+           left.integrity == right.integrity;
 }
 
 std::wstring currentLogonSidString() {
@@ -141,12 +149,23 @@ bool makeSecurityAttributes(SECURITY_ATTRIBUTES& attributes, PSECURITY_DESCRIPTO
     if (!currentTokenDetails(details)) return false;
     if (details.restricted || details.appContainer || details.integrity < SECURITY_MANDATORY_MEDIUM_RID) return false;
     sidStorage = details.logon;
-    const DWORD aclBytes = sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) + GetLengthSid(reinterpret_cast<PSID>(sidStorage.data())) - sizeof(DWORD);
+    // 同一个 DACL 里再放一条 ALL APPLICATION PACKAGES：打包应用（系统搜索、设置、
+    // 商店应用）属于 AppContainer，只有登录 SID 的 ACE 它们打不开管道。
+    std::vector<std::uint8_t> packageStorage(SECURITY_MAX_SID_SIZE);
+    DWORD packageBytes = static_cast<DWORD>(packageStorage.size());
+    if (!CreateWellKnownSid(WinBuiltinAnyPackageSid, nullptr, packageStorage.data(), &packageBytes)) return false;
+    const PSID logonSid = reinterpret_cast<PSID>(sidStorage.data());
+    const PSID packageSid = reinterpret_cast<PSID>(packageStorage.data());
+    const DWORD access = kPipeAccess | FILE_GENERIC_READ | FILE_GENERIC_WRITE;
+    const DWORD aclBytes = sizeof(ACL) +
+        2 * (sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD)) +
+        GetLengthSid(logonSid) + GetLengthSid(packageSid);
     acl = reinterpret_cast<PACL>(LocalAlloc(LPTR, aclBytes));
     descriptor = reinterpret_cast<PSECURITY_DESCRIPTOR>(LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH));
     if (!acl || !descriptor) return false;
     if (!InitializeAcl(acl, aclBytes, ACL_REVISION) ||
-        !AddAccessAllowedAce(acl, ACL_REVISION, kPipeAccess | FILE_GENERIC_READ | FILE_GENERIC_WRITE, reinterpret_cast<PSID>(sidStorage.data())) ||
+        !AddAccessAllowedAce(acl, ACL_REVISION, access, logonSid) ||
+        !AddAccessAllowedAce(acl, ACL_REVISION, access, packageSid) ||
         !InitializeSecurityDescriptor(descriptor, SECURITY_DESCRIPTOR_REVISION) ||
         !SetSecurityDescriptorDacl(descriptor, TRUE, acl, FALSE)) return false;
     attributes.nLength = sizeof(attributes);
