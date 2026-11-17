@@ -225,6 +225,10 @@ bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
         backupDirectory_ = rootDirectory_ / L"Backups";
         const auto logDirectory = rootDirectory_ / L"Logs";
         std::error_code ec;
+        // 选了「方案来源」就直接用那个目录，不再发布副本。
+        std::filesystem::path externalSource;
+        const bool usingExternalSource = resolveSchemeSource(sharedDirectory_, externalSource);
+        if (usingExternalSource) sharedDirectory_ = externalSource;
         for (const auto& directory : {sharedDirectory_.parent_path(), userDirectory_,
                                       stagingDirectory_, backupDirectory_, logDirectory}) {
             std::filesystem::create_directories(directory, ec);
@@ -239,22 +243,28 @@ bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
         logDirectoryUtf8_ = utf8(logDirectory);
         std::filesystem::create_directories(stagingDirectory_ / L"Rime", ec);
         const auto journal = stagingDirectory_ / L"resource-deploy.journal";
-        if (!hasFile(journal) && !hasFile(stagingDirectory_ / L".xmjd-resource-pending") &&
-            hasDirectory(sharedDirectory_) && !hasPublishedMarker(sharedDirectory_)) {
-            errorCode = kRuntimeErrorResources;
-            return false;
-        }
         bool recoveredInitialDeploy = false;
-        if (ec || !recoverResourceJournal(recoveredInitialDeploy, errorCode)) {
-            if (!errorCode) errorCode = kRuntimeErrorJournal;
-            return false;
-        }
-
         const auto deployMarker = stagingDirectory_ / L".xmjd-deploy-pending";
         const bool settingsDeployPending = hasFile(deployMarker);
-        bool pendingInitialDeploy = recoveredInitialDeploy ||
-            hasFile(stagingDirectory_ / L".xmjd-resource-pending") || settingsDeployPending;
-        if (!publishResources(explicitDeploy, pendingInitialDeploy, errorCode)) return false;
+        bool pendingInitialDeploy = false;
+        if (usingExternalSource) {
+            // 外部方案目录：不发布、不写标记，也不在里面留任何文件。
+            // 首次使用（或换了目录）整份重新编译一次。
+            pendingInitialDeploy = true;
+        } else {
+            if (!hasFile(journal) && !hasFile(stagingDirectory_ / L".xmjd-resource-pending") &&
+                hasDirectory(sharedDirectory_) && !hasPublishedMarker(sharedDirectory_)) {
+                errorCode = kRuntimeErrorResources;
+                return false;
+            }
+            if (ec || !recoverResourceJournal(recoveredInitialDeploy, errorCode)) {
+                if (!errorCode) errorCode = kRuntimeErrorJournal;
+                return false;
+            }
+            pendingInitialDeploy = recoveredInitialDeploy ||
+                hasFile(stagingDirectory_ / L".xmjd-resource-pending") || settingsDeployPending;
+            if (!publishResources(explicitDeploy, pendingInitialDeploy, errorCode)) return false;
+        }
         if (!loadLibrary(errorCode)) return false;
 
         RIME_STRUCT_INIT(RimeTraits, traits_);
@@ -284,7 +294,7 @@ bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
             return false;
         }
         if (pendingInitialDeploy) {
-            if (!writeFile(sharedDirectory_ / L".xmjd-resource-ready", "xmjd6\n")) {
+            if (!usingExternalSource && !writeFile(sharedDirectory_ / L".xmjd-resource-ready", "xmjd6\n")) {
                 errorCode = kRuntimeErrorResources;
                 return false;
             }
@@ -307,6 +317,7 @@ bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
             // Best effort: a leftover marker only causes one extra deployment.
             DeleteFileW(deployMarker.c_str());
         }
+        if (explicitDeploy || !probeUpToDate()) writeEngineProbe();
         ready_ = true;
         return true;
     } catch (const std::filesystem::filesystem_error&) {
@@ -534,7 +545,7 @@ std::filesystem::path RimeRuntime::settingsPath() const {
     return rootDirectory_ / L"settings.ini";
 }
 
-std::string RimeRuntime::readSettingsSchema() const {
+std::string RimeRuntime::readSettingsValue(std::string_view key) const {
     const auto contents = readSmallFile(settingsPath());
     if (!contents) return {};
     std::size_t offset = 0;
@@ -543,14 +554,42 @@ std::string RimeRuntime::readSettingsSchema() const {
         const auto line = trimAscii(std::string_view(*contents).substr(
             offset, end == std::string::npos ? std::string::npos : end - offset));
         const auto equals = line.find('=');
-        if (equals != std::string::npos && line.compare(0, equals, "schema") == 0) {
-            const std::string value = trimAscii(std::string_view(line).substr(equals + 1));
-            if (validSchemaId(value)) return value;
+        if (equals == key.size() && line.compare(0, key.size(), key) == 0) {
+            return trimAscii(std::string_view(line).substr(equals + 1));
         }
         if (end == std::string::npos) break;
         offset = end + 1;
     }
     return {};
+}
+
+// 「方案来源」：用户在设置里选了目录，就直接把这个目录当作 Rime 的共享数据目录，
+// 不再复制副本。这样选哪个就是哪个，字典改了重开一次引擎就跟着变。
+bool RimeRuntime::resolveSchemeSource(const std::filesystem::path& bundled, std::filesystem::path& resolved) const {
+    const std::string configured = readSettingsValue("scheme_source");
+    if (configured.empty()) return false;
+    std::error_code ec;
+    const auto candidate = std::filesystem::path(widen(configured));
+    if (!std::filesystem::is_directory(candidate, ec)) return false;
+    if (!std::filesystem::is_regular_file(candidate / L"default.yaml", ec)) return false;
+    bool hasSchema = false;
+    for (std::filesystem::directory_iterator it(candidate, ec), end; it != end && !ec; it.increment(ec)) {
+        const auto name = it->path().filename().wstring();
+        if (it->is_regular_file(ec) && name.size() > 12 &&
+            name.compare(name.size() - 12, 12, L".schema.yaml") == 0) {
+            hasSchema = true;
+            break;
+        }
+    }
+    if (!hasSchema) return false;
+    resolved = candidate;
+    (void)bundled;
+    return true;
+}
+
+std::string RimeRuntime::readSettingsSchema() const {
+    const std::string value = readSettingsValue("schema");
+    return validSchemaId(value) ? value : std::string{};
 }
 
 bool RimeRuntime::writeSettingsSchema(const std::string& schema) {
@@ -616,6 +655,7 @@ bool RimeRuntime::redeploy(int& errorCode) {
         return false;
     }
     DeleteFileW((stagingDirectory_ / L".xmjd-deploy-pending").c_str());
+    writeEngineProbe();
     ready_ = true;
     return true;
 }
@@ -694,6 +734,61 @@ void RimeRuntime::cancel(std::uint64_t session) {
     state->pendingRawCommit.clear();
     api_->clear_composition(state->id);
     (void)takeCommit(api_, state->id);
+}
+
+bool RimeRuntime::probeUpToDate() const {
+    const auto contents = readSmallFile(stagingDirectory_ / L".engine-probe");
+    if (!contents) return false;
+    return *contents == std::string(XMJD_VERSION_STRING) + ":" + selectedSchema_;
+}
+
+// 引擎自检：装完/部署后自动把 k-a-d 的候选与上屏写进 Logs\engine-probe.log，
+// 用于判断「顶功没生效」是引擎没提交还是前端丢了结果。只建临时会话，不影响输入。
+void RimeRuntime::writeEngineProbe() {
+    if (!initialized_ || !api_ || selectedSchema_.empty()) return;
+    const RimeSessionId session = api_->create_session();
+    if (!session) return;
+    if (!api_->select_schema(session, selectedSchema_.c_str())) {
+        api_->destroy_session(session);
+        return;
+    }
+    auto takeCommit = [&]() {
+        std::string text;
+        RimeCommit commit{};
+        RIME_STRUCT_INIT(RimeCommit, commit);
+        const std::unique_ptr<RimeCommit, decltype(api_->free_commit)> cleanup(&commit, api_->free_commit);
+        if (api_->get_commit(session, &commit) && commit.text) text = commit.text;
+        return text;
+    };
+    auto describe = [&](const char* label, int handled, const std::string& commit) {
+        std::string line = "key " + std::string(label) + " handled=" + (handled ? "1" : "0");
+        line += " commit=\"" + commit + "\"";
+        RimeContext context{};
+        RIME_STRUCT_INIT(RimeContext, context);
+        const std::unique_ptr<RimeContext, decltype(api_->free_context)> cleanup(&context, api_->free_context);
+        if (api_->get_context(session, &context)) {
+            if (context.composition.preedit) line += std::string(" preedit=\"") + context.composition.preedit + "\"";
+            if (const char* input = api_->get_input(session)) line += std::string(" input=\"") + input + "\"";
+            const int count = std::max(0, context.menu.num_candidates);
+            line += " candidates=" + std::to_string(count);
+            for (int i = 0; i < count && i < 6; ++i) {
+                if (!context.menu.candidates[i].text) continue;
+                line += " [" + std::to_string(i) + "]" + context.menu.candidates[i].text;
+            }
+        }
+        return line;
+    };
+
+    std::string report = "schema=" + selectedSchema_ + "\n";
+    for (const char* key = "kad"; *key; ++key) {
+        const char label[2] = {*key, '\0'};
+        const int handled = api_->process_key(session, *key, 0);
+        report += describe(label, handled, takeCommit()) + "\n";
+    }
+    api_->destroy_session(session);
+    writeFile(rootDirectory_ / L"Logs" / L"engine-probe.log", report);
+    writeFile(stagingDirectory_ / L".engine-probe",
+              std::string(XMJD_VERSION_STRING) + ":" + selectedSchema_);
 }
 
 Snapshot RimeRuntime::snapshot(std::uint64_t session, bool drainCommit) {

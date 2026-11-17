@@ -41,6 +41,8 @@ public:
     // -1 when the point is outside every candidate.
     int hitTest(POINT client) const;
     const xmjd::CandidateLayout& layout() const { return layout_; }
+    // 面板外面还包着一圈投影，窗口比 layout 大这么多；定位和命中测试都要按它换算。
+    int shadowMargin() const { return shadowMargin_; }
 
 private:
     bool paintInternal(HWND window, int dpi, int x, int y);
@@ -48,8 +50,10 @@ private:
 
     xmjd::CandidateStyle style_;
     xmjd::CandidateLayout layout_;
+    std::vector<CandidateItem> items_;
     std::vector<CandidateValue> values_;
     UINT selected_ = 0;
+    int shadowMargin_ = 0;
     int lastX_ = 0;
     int lastY_ = 0;
     int lastDpi_ = 0;

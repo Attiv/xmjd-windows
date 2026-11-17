@@ -215,10 +215,11 @@ enable_language(RC)
 add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
 add_library(xmjd_windows_common STATIC
   Native/Common/Pipe.cpp
-  Native/Common/CandidateStyle.cpp)
+  Native/Common/CandidateStyle.cpp
+  Native/Common/CandidatePainter.cpp)
 target_include_directories(xmjd_windows_common PUBLIC
   "${XMJD_ROOT}/Native/Common" "${XMJD_ROOT}/Native/Protocol")
-target_link_libraries(xmjd_windows_common PUBLIC xmjd_protocol advapi32 shell32 uuid)
+target_link_libraries(xmjd_windows_common PUBLIC xmjd_protocol advapi32 shell32 uuid gdiplus)
 if(BUILD_TESTING)
   add_executable(CandidateStyleTests Tests/CandidateStyleTests.cpp)
   target_link_libraries(CandidateStyleTests PRIVATE xmjd_windows_common)
@@ -354,11 +355,12 @@ if(XMJD_ARCH STREQUAL "x64")
   configure_file(cmake/SettingsVersion.rc.in "${XMJD_GENERATED_DIR}/SettingsVersion.rc" @ONLY)
   add_executable(XMJDSettings WIN32
     Native/Settings/Main.cpp
+    Native/Settings/StylePreview.cpp
     Native/Settings/Settings.rc
     "${XMJD_GENERATED_DIR}/SettingsVersion.rc")
   target_include_directories(XMJDSettings PRIVATE
     "${XMJD_GENERATED_DIR}" "${XMJD_ROOT}/Native/Settings")
-  target_link_libraries(XMJDSettings PRIVATE xmjd_windows_common comctl32 user32 shell32 ole32)
+  target_link_libraries(XMJDSettings PRIVATE xmjd_windows_common comctl32 user32 shell32 ole32 gdiplus)
   set_target_properties(XMJDSettings PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
     VS_DPI_AWARE "PerMonitor")

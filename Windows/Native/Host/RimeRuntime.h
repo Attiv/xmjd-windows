@@ -49,10 +49,14 @@ private:
     bool sessionHealthy(RimeSessionId session, const char* expectedSchema = nullptr);
     std::vector<std::pair<std::string, std::string>> schemaList();
     std::filesystem::path settingsPath() const;
+    std::string readSettingsValue(std::string_view key) const;
     std::string readSettingsSchema() const;
+    bool resolveSchemeSource(const std::filesystem::path& bundled, std::filesystem::path& resolved) const;
     bool writeSettingsSchema(const std::string& schema);
     bool loadSelectedSchema();
     void rememberSessionSchema(RimeSessionId session);
+    bool probeUpToDate() const;
+    void writeEngineProbe();
 
     std::filesystem::path executableDirectory_;
     std::filesystem::path rootDirectory_;

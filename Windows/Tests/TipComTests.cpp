@@ -161,7 +161,9 @@ bool verifyActivation(IClassFactory* factory, HMODULE module) {
         CHECK(tip->Deactivate() == S_OK);
         CHECK(!manager.keySink && !manager.profileSink && !manager.threadSink && manager.refs == 1);
     }
-    CHECK(manager.activeFlagsQueries == 4);
+    // 候选由谁绘制只由 BeginUIElement 回填的 pbShow 决定；UILess 标志
+    // （activeFlags）不再参与判断，所以这里不应再去查询 GetActiveFlags。
+    CHECK(manager.activeFlagsQueries == 0);
     CHECK(manager.threadAdviceCount == 3);
     return true;
 }

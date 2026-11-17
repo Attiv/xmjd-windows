@@ -159,6 +159,7 @@ private:
     bool positionCandidateWindow(TfEditCookie cookie);
     bool showCandidateWindow(bool show);
     bool createCandidateWindow();
+    void showContextMenu(HWND window);
     bool processCandidateSelection(EditSession* edit, TfEditCookie cookie);
     UINT rimeModifiers() const;
     bool shouldTestKey(UINT virtualKey, bool keyUp) const;
@@ -201,7 +202,7 @@ private:
     bool capsKeyDown_ = false;
     UINT modifierKeysDown_ = 0;
     bool uiElementShow_ = false;
-    bool uiLess_ = false;
+    bool uiElementAttempted_ = false;
 };
 
 } // namespace xmjd::tip

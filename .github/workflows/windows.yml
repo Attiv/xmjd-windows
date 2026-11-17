@@ -3,6 +3,8 @@ name: Windows build and installer
 on:
   push:
     branches: [main]
+    # v0.1.5+8 这样的 tag 会额外发一个 GitHub Release。
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -12,6 +14,9 @@ jobs:
   windows:
     runs-on: windows-2025
     timeout-minutes: 45
+    # 只有打 tag 发布时才需要写权限，其余时候仍按只读跑。
+    permissions:
+      contents: write
     defaults:
       run:
         shell: powershell
@@ -91,3 +96,27 @@ jobs:
             Windows/out/engine-logs/*
           if-no-files-found: warn
           retention-days: 14
+      - name: Publish GitHub release (tags only)
+        # 用 runner 自带的 gh，避免再引入一个未固定 SHA 的第三方 action。
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $parts = @{}
+          foreach ($line in (Get-Content -LiteralPath .\Windows\VERSION)) {
+            if ($line -match '^(MAJOR|MINOR|PATCH|BUILD)=([0-9]+)$') { $parts[$Matches[1]] = $Matches[2] }
+          }
+          $version = '{0}.{1}.{2}+{3}' -f $parts.MAJOR, $parts.MINOR, $parts.PATCH, $parts.BUILD
+          $files = @(Get-ChildItem -LiteralPath .\Windows\out\release -File | ForEach-Object { $_.FullName })
+          $files += @(Get-ChildItem -LiteralPath .\Windows\out\package -Filter *.zip -File | ForEach-Object { $_.FullName })
+          if ($files.Count -eq 0) { throw '没有可发布的构建产物。' }
+          $notes = @"
+          星猫键道 Windows $version
+
+          - 安装包：XMJD-$version-windows-x64-setup.exe（自动卸载旧版本，保留用户词库与皮肤）
+          - 免安装包与源码包见下方附件；校验值见 SHA256SUMS.txt
+          - 首次输入会编译词典，约一分钟
+          "@
+          & gh release create $env:GITHUB_REF_NAME --title "星猫键道 $version" --notes $notes @files
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create 失败。' }

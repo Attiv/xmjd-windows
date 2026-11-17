@@ -565,7 +565,8 @@ const std::vector<CandidateStyle>& builtinCandidateStyles() {
     static const std::vector<CandidateStyle> styles = [] {
         std::vector<CandidateStyle> list;
 
-        // 「系统简约」 mirrors macOS/CandidateStyles/macos-default.json.
+        // 「系统简约」：与 Mac 版同一套视觉语言——近白底、12pt 圆角、
+        // 蓝色到靛蓝的选中渐变，浅/深两套配色都由 AppsUseLightTheme 切换。
         {
             CandidateStyle style = documentDefaults();
             style.id = "system";
@@ -581,32 +582,29 @@ const std::vector<CandidateStyle>& builtinCandidateStyles() {
             style.paddingHorizontal = 10;
             style.paddingVertical = 4;
             style.preeditSpacing = 4;
-            style.cornerRadius = 10;
-            style.itemRadius = 6;
+            style.cornerRadius = 12;
+            style.itemRadius = 7;
             style.opacity = 1;
-            style.maxWidth = 600;
+            style.maxWidth = 620;
             style.showPreedit = false;
-            style.background = ColorPair{StyleColor{1, 1, 1, 1}, StyleColor{0.0902, 0.1059, 0.1686, 1}};
-            style.text = ColorPair{StyleColor{0.0824, 0.102, 0.1608, 1}, StyleColor{0.9412, 0.949, 0.9843, 1}};
-            style.accent = ColorPair{StyleColor{0.3569, 0.2941, 0.9098, 1}, StyleColor{0.4275, 0.3608, 0.9412, 1}};
+            style.background = makePair(0xFBFBFD, 0x1C1C1E, 0.98, 0.98);
+            style.text = makePair(0x1D1D1F, 0xF5F5F7);
+            style.accent = makePair(0x0A84FF, 0x409CFF);
             style.decoration = CandidateDecoration{
-                ColorPair{StyleColor{0.949, 0.9529, 0.9804, 1}, StyleColor{0.0549, 0.0667, 0.1098, 1}},
-                ColorPair{StyleColor{0.2392, 0.349, 0.7686, 1}, StyleColor{0.298, 0.4039, 0.8196, 1}},
-                ColorPair{StyleColor{0.0431, 0.4353, 0.5412, 1}, StyleColor{0.0863, 0.4784, 0.6196, 1}},
-                ColorPair{StyleColor{1, 1, 1, 1}, StyleColor{1, 1, 1, 1}},
-                ColorPair{StyleColor{0.4118, 0.4471, 0.5412, 1}, StyleColor{0.6667, 0.702, 0.7843, 1}}};
+                makePair(0xF2F2F7, 0x232326, 0.98, 0.98),
+                makePair(0x0A84FF, 0x0A84FF),
+                makePair(0x5E5CE6, 0x5E5CE6),
+                makePair(0xFFFFFF, 0xFFFFFF),
+                makePair(0x86868B, 0x98989D)};
             list.push_back(style);
         }
 
-        // 「星轨」: dark-first orbit console with a violet-to-teal selection.
+        // 「星轨」：深空底色 + 紫到青的选中渐变。
         {
             CandidateStyle style = documentDefaults();
             style.id = "orbit";
             style.name = "星轨";
             style.horizontal = true;
-            style.background = makePair(0xFFFFFF, 0x171B2B);
-            style.text = makePair(0x151A29, 0xF0F2FB);
-            style.accent = makePair(0x5B4BE8, 0x6D5CF0);
             style.fontSize = 17;
             style.commentSize = 11;
             style.rowHeight = 32;
@@ -615,79 +613,136 @@ const std::vector<CandidateStyle>& builtinCandidateStyles() {
             style.paddingHorizontal = 10;
             style.paddingVertical = 4;
             style.preeditSpacing = 4;
-            style.cornerRadius = 11;
-            style.itemRadius = 7;
+            style.cornerRadius = 12;
+            style.itemRadius = 8;
             style.showPreedit = false;
+            style.background = makePair(0xF4F3FB, 0x12121A, 0.98, 0.98);
+            style.text = makePair(0x242236, 0xEDEBFF);
+            style.accent = makePair(0x6D5CF0, 0x8B7CFF);
             style.decoration = CandidateDecoration{
-                makePair(0xF2F3FA, 0x0E111C),
-                makePair(0x3D59C4, 0x4C67D1),
-                makePair(0x0B6F8A, 0x167A9E),
+                makePair(0xE9E6FB, 0x191926, 0.98, 0.98),
+                makePair(0x6D5CF0, 0x8B7CFF),
+                makePair(0x3ED0C4, 0x3ED0C4),
                 makePair(0xFFFFFF, 0xFFFFFF),
-                makePair(0x69728A, 0xAAB3C8)};
+                makePair(0x6E6A8A, 0x9B96B8)};
             list.push_back(style);
         }
 
-        // 「经典竖排」
+        // 「经典竖排」：克制的灰阶，方一点、窄一点。
         {
             CandidateStyle style = documentDefaults();
             style.id = "classic";
             style.name = "经典竖排";
+            style.horizontal = false;
+            style.fontSize = 16;
+            style.commentSize = 12;
+            style.rowHeight = 28;
+            style.padding = 8;
+            style.itemSpacing = 4;
+            style.paddingHorizontal = 8;
+            style.paddingVertical = 4;
+            style.cornerRadius = 8;
+            style.itemRadius = 4;
+            style.maxWidth = 360;
+            style.showPreedit = false;
+            style.background = makePair(0xF5F5F7, 0x2C2C2E, 0.99, 0.99);
+            style.text = makePair(0x1D1D1F, 0xF2F2F7);
+            style.accent = makePair(0x6E6E73, 0x8E8E93);
+            style.decoration.reset();
             list.push_back(style);
         }
 
-        // 「紧凑横排」
+        // 「紧凑横排」：小字号、窄间距，适合贴边使用。
         {
             CandidateStyle style = documentDefaults();
             style.id = "compact";
             style.name = "紧凑横排";
             style.horizontal = true;
-            style.fontSize = 15;
-            style.commentSize = 11;
-            style.rowHeight = 24;
-            style.padding = 8;
-            style.itemSpacing = 6;
+            style.fontSize = 14;
+            style.commentSize = 10;
+            style.rowHeight = 22;
+            style.padding = 6;
+            style.itemSpacing = 2;
+            style.spacingHorizontal = 2;
+            style.spacingVertical = 2;
+            style.paddingHorizontal = 7;
+            style.paddingVertical = 3;
+            style.cornerRadius = 8;
+            style.itemRadius = 5;
+            style.maxWidth = 520;
+            style.showPreedit = false;
+            style.background = makePair(0xFFFFFF, 0x1F1F22, 0.99, 0.99);
+            style.text = makePair(0x1D1D1F, 0xF2F2F7);
+            style.accent = makePair(0x0A84FF, 0x409CFF);
+            style.decoration = CandidateDecoration{
+                makePair(0xF7F7FA, 0x26262A, 0.99, 0.99),
+                makePair(0x0A84FF, 0x0A84FF),
+                makePair(0x0A84FF, 0x0A84FF),
+                makePair(0xFFFFFF, 0xFFFFFF),
+                makePair(0x86868B, 0x98989D)};
             list.push_back(style);
         }
 
-        // 「大字清晰」
+        // 「大字清晰」：大字号、大留白，远距离/低视力场景。
         {
             CandidateStyle style = documentDefaults();
             style.id = "large";
             style.name = "大字清晰";
-            style.fontSize = 24;
-            style.commentSize = 17;
-            style.rowHeight = 40;
-            style.padding = 16;
+            style.horizontal = true;
+            style.fontSize = 26;
+            style.commentSize = 18;
+            style.rowHeight = 46;
+            style.padding = 14;
             style.itemSpacing = 8;
-            style.cornerRadius = 14;
+            style.spacingHorizontal = 8;
+            style.spacingVertical = 8;
+            style.paddingHorizontal = 14;
+            style.paddingVertical = 8;
+            style.cornerRadius = 16;
+            style.itemRadius = 10;
+            style.maxWidth = 760;
+            style.showPreedit = false;
+            style.background = makePair(0xFFFFFF, 0x1C1C1E, 0.99, 0.99);
+            style.text = makePair(0x1D1D1F, 0xF5F5F7);
+            style.accent = makePair(0x0A84FF, 0x409CFF);
+            style.decoration = CandidateDecoration{
+                makePair(0xF2F2F7, 0x232326, 0.99, 0.99),
+                makePair(0x0A84FF, 0x0A84FF),
+                makePair(0x5E5CE6, 0x5E5CE6),
+                makePair(0xFFFFFF, 0xFFFFFF),
+                makePair(0x86868B, 0x98989D)};
             list.push_back(style);
         }
 
-        // 「节庆流光」
+        // 「节庆流光」：暖奶油底 + 珊瑚到琥珀的流光渐变。
         {
             CandidateStyle style = documentDefaults();
             style.id = "fiesta";
             style.name = "节庆流光";
             style.horizontal = true;
-            style.fontName = "PingFang SC";
             style.fontSize = 16;
             style.commentSize = 12;
             style.rowHeight = 32;
-            style.padding = 0;
-            style.itemSpacing = 0;
-            style.preeditSpacing = 0;
+            style.padding = 6;
+            style.itemSpacing = 4;
+            style.spacingHorizontal = 4;
+            style.spacingVertical = 4;
+            style.paddingHorizontal = 10;
+            style.paddingVertical = 4;
             style.cornerRadius = 14;
-            style.itemRadius = 0;
+            style.itemRadius = 8;
+            style.maxWidth = 620;
             style.showPreedit = false;
-            style.background = makePair(0xFFF5EC, 0x2A191B, 0.985, 0.985);
-            style.text = makePair(0x402B2A, 0xFFF0E9);
-            style.accent = makePair(0xBD382F, 0xFF8579);
+            style.background = makePair(0xFFF7EC, 0x2A1A18, 0.985, 0.985);
+            style.text = makePair(0x3A2622, 0xFBEDE4);
+            style.accent = makePair(0xFF7A59, 0xFF8E6E);
             style.decoration = CandidateDecoration{
-                makePair(0xEEF3FF, 0x17203A, 0.965, 0.965),
-                makePair(0x3153AD, 0x94B3FF),
-                makePair(0x816700, 0xF0D45F),
-                makePair(0xFFFFFF, 0x391314),
-                makePair(0x755951, 0xD0B1AB)};
+                makePair(0xFFE9D6, 0x331F1C, 0.985, 0.985),
+                // 深色下把渐变压深一档，白色选中文字压在琥珀端才够对比。
+                makePair(0xFF7A59, 0xE2552B),
+                makePair(0xFFB03A, 0xF08A2E),
+                makePair(0xFFFFFF, 0xFFFFFF),
+                makePair(0x8C6A5E, 0xC9A99C)};
             list.push_back(style);
         }
         return list;
@@ -940,8 +995,9 @@ CandidateMetrics candidateMetrics(const CandidateStyle& style, int dpi) {
     metrics.spacingH = std::max(0, stylePixels(style.horizontalSpacing(), dpi));
     metrics.spacingV = std::max(0, stylePixels(style.verticalSpacing(), dpi));
     metrics.maxWidth = std::max(120, stylePixels(style.maxWidth, dpi));
-    metrics.labelGap = style.showLabels ? std::max(2, metrics.fontSize / 5) : 0;
-    metrics.commentGap = style.showComments ? std::max(3, metrics.fontSize / 4) : 0;
+    // 序号与正文之间、正文与注音之间留出可读的缝：Mac 版大约是 0.25em / 0.4em。
+    metrics.labelGap = style.showLabels ? std::max(2, metrics.fontSize / 4) : 0;
+    metrics.commentGap = style.showComments ? std::max(4, metrics.fontSize * 2 / 5) : 0;
     return metrics;
 }
 

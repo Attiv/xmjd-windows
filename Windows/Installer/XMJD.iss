@@ -240,6 +240,94 @@ begin
   Log(Format('Repair payload check exit code: %d', [ResultCode]));
 end;
 
+function ExistingInstallationPresent: Boolean;
+begin
+  Result := RegKeyExists(HKLM64, UninstallKey) or
+    RegValueExists(HKLM64, TipClassKey, '') or
+    RegValueExists(HKLM32, TipClassKey, '') or
+    RegValueExists(HKLM64, 'Software\XMJD', 'HostExecutablePath') or
+    RegValueExists(HKLM64, 'Software\XMJD', 'RegistrationComplete') or
+    RegValueExists(HKLM64, StartupKey, 'XMJDHost');
+end;
+
+function UninstallerPathFromCommand(const Command: String): String;
+var
+  Closing, Space: Integer;
+begin
+  Result := '';
+  if Command = '' then
+    Exit;
+  if Command[1] = '"' then
+  begin
+    Closing := Pos('"', Copy(Command, 2, Length(Command) - 1));
+    if Closing > 0 then
+      Result := Copy(Command, 2, Closing - 1);
+  end
+  else
+  begin
+    Space := Pos(' ', Command);
+    if Space > 0 then
+      Result := Copy(Command, 1, Space - 1)
+    else
+      Result := Command;
+  end;
+end;
+
+procedure StopRunningHost;
+var
+  ResultCode: Integer;
+begin
+  { 旧 Host 属于普通桌面会话，注销注册后仍需结束它，否则它的单实例互斥量
+    会让新安装的 Host 一启动就退出。 }
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM XMJDHost.exe /F', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Log(Format('taskkill XMJDHost exit code: %d', [ResultCode]));
+end;
+
+function UninstallPreviousVersion(var Error: String): Boolean;
+var
+  Command, Uninstaller, Parameters, AllowedRoot: String;
+  ResultCode: Integer;
+begin
+  Result := False;
+  Error := '';
+  if not RegQueryStringValue(HKLM64, UninstallKey, 'UninstallString', Command) then
+  begin
+    { 只有残留注册项时没有可执行的卸载器；让 register.ps1 报出具体冲突。 }
+    Result := True;
+    Exit;
+  end;
+  Uninstaller := UninstallerPathFromCommand(Command);
+  AllowedRoot := Lowercase(ExpandConstant('{autopf}\XMJD\'));
+  if (Uninstaller = '') or (Pos(AllowedRoot, Lowercase(Uninstaller)) <> 1) or
+    (CompareText(ExtractFileName(Uninstaller), 'unins000.exe') <> 0) or
+    (not FileExists(Uninstaller)) then
+  begin
+    Error := 'The existing XMJD uninstaller could not be located safely. ' +
+      'Uninstall XMJD from Settings > Apps, then run this installer again.';
+    Exit;
+  end;
+  Parameters := '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' +
+    ExpandConstant('{tmp}\XMJD-previous-uninstall.log') + '"';
+  Log('Uninstalling previous XMJD: ' + Uninstaller);
+  if not Exec(Uninstaller, Parameters, ExtractFileDir(Uninstaller),
+    SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Error := 'The previous XMJD uninstaller could not be started. ' +
+      'Uninstall XMJD from Settings > Apps, then run this installer again.';
+    Exit;
+  end;
+  Log(Format('Previous XMJD uninstaller exit code: %d', [ResultCode]));
+  { 0=成功；3010/1641=成功但需重启（输入法 DLL 仍被加载）。 }
+  if (ResultCode <> 0) and (ResultCode <> 3010) and (ResultCode <> 1641) then
+  begin
+    Error := 'The previous XMJD uninstaller failed with exit code ' + IntToStr(ResultCode) +
+      '. Uninstall XMJD from Settings > Apps, then run this installer again.';
+    Exit;
+  end;
+  Result := True;
+end;
+
 function InitializeSetup: Boolean;
 var
   Version: TWindowsVersion;
@@ -257,7 +345,7 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  InstallDirectory, PreviousVersion: String;
+  InstallDirectory, InstallError: String;
 begin
   Result := '';
   InstallDirectory := FixedInstallDirectory;
@@ -281,23 +369,26 @@ begin
       end;
     end;
   end
+  else if ExistingInstallationPresent then
+  begin
+    { 新版直接接管旧版：COM/TSF 注册是全局单份的，register.ps1 会拒绝覆盖
+      其它安装，所以先静默卸载旧版本再继续。 }
+    if not UninstallPreviousVersion(InstallError) then
+      Result := InstallError
+    else
+    begin
+      StopRunningHost;
+      if DirExists(InstallDirectory) or FileExists(InstallDirectory) then
+        Result := 'The previous XMJD installation could not be removed completely: ' + InstallDirectory +
+          '. Restart Windows so loaded input-method files are released, then run this installer again.'
+      else if ExistingInstallationPresent then
+        Result := 'The previous XMJD registration is still present after uninstalling. ' +
+          'Restart Windows, then run this installer again.';
+    end;
+  end
   else if DirExists(InstallDirectory) or FileExists(InstallDirectory) then
     Result := 'This version directory already exists: ' + InstallDirectory +
-      '. To restore this same-version installation, run this installer with /REPAIR. Otherwise uninstall it first, then sign out or restart if files are still in use.'
-  else if RegValueExists(HKLM64, TipClassKey, '') or
-    RegValueExists(HKLM32, TipClassKey, '') or
-    RegValueExists(HKLM64, 'Software\XMJD', 'HostExecutablePath') or
-    RegValueExists(HKLM64, 'Software\XMJD', 'RegistrationComplete') or
-    RegValueExists(HKLM64, StartupKey, 'XMJDHost') then
-  begin
-    if RegQueryStringValue(HKLM64, UninstallKey, 'DisplayVersion', PreviousVersion) then
-      Result := 'XMJD ' + PreviousVersion + ' is already installed. Open Settings > Apps > Installed apps, ' +
-        'uninstall XMJD, then run this installer again. Your user data will be preserved.'
-    else
-      Result := 'An XMJD installation or partial registration already exists. Uninstall the previous XMJD version first; ' +
-        'your user data will be preserved. If it was installed manually, run that installation''s scripts\unregister.ps1 ' +
-        'as administrator before retrying.';
-  end;
+      '. To restore this same-version installation, run this installer with /REPAIR.';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

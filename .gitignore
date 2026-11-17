@@ -1,0 +1,13 @@
+# 构建输出（cmake / 安装器 / 打包）
+Windows/out/
+
+# 下载并校验过的第三方依赖（prepare-deps 会重新拉取）
+Windows/.deps/
+
+# 本地会话记忆与临时文件
+.workbuddy/
+
+# Windows 杂项
+Thumbs.db
+Desktop.ini
+*.user

@@ -6,12 +6,15 @@
 #include <msctf.h>
 #include <ctfutb.h>
 #include <oleauto.h>
+#include <shellapi.h>
 #include <windowsx.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <climits>
 #include <atomic>
+#include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <new>
 #include <string>
@@ -42,6 +45,10 @@ constexpr UINT kEngineRetryIntervalMs = 500;
 constexpr ULONGLONG kHostLaunchIntervalMs = 2000;
 constexpr wchar_t kPopupClassName[] = L"XMJD.TSF.CandidatePopup.v1";
 const GUID kTipCategories[] = {GUID_TFCAT_TIP_KEYBOARD, GUID_TFCAT_TIPCAP_UIELEMENTENABLED};
+// 候选窗右键菜单：输入法内部没有其它入口能打开设置，只能在候选窗上给出。
+constexpr UINT kMenuSettings = 1;
+constexpr UINT kMenuUserData = 2;
+constexpr UINT kMenuLogs = 3;
 
 using Microsoft::WRL::ComPtr;
 
@@ -92,6 +99,57 @@ std::wstring modulePath() {
     if (length == 0 || length >= path.size()) return {};
     path.resize(length);
     return path;
+}
+
+// 候选窗失败的诊断日志：最多每秒一行，正常输入时几乎没有开销。
+void logCandidateStage(const char* stage) {
+    static std::atomic<ULONGLONG> lastWrite{0};
+    const ULONGLONG now = GetTickCount64();
+    ULONGLONG previous = lastWrite.load();
+    if (now - previous < 1000) return;
+    if (!lastWrite.compare_exchange_strong(previous, now)) return;
+    const auto root = xmjd::win::dataRoot();
+    if (root.empty()) return;
+    const auto directory = root / L"Logs";
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec) return;
+    std::ofstream stream(directory / L"tip.log", std::ios::app | std::ios::binary);
+    if (!stream) return;
+    SYSTEMTIME time{};
+    GetLocalTime(&time);
+    char stamp[64]{};
+    std::snprintf(stamp, sizeof(stamp), "%04u-%02u-%02u %02u:%02u:%02u ",
+                  static_cast<unsigned>(time.wYear), static_cast<unsigned>(time.wMonth),
+                  static_cast<unsigned>(time.wDay), static_cast<unsigned>(time.wHour),
+                  static_cast<unsigned>(time.wMinute), static_cast<unsigned>(time.wSecond));
+    stream << stamp << stage << '\n';
+}
+
+bool readHostExecutable(std::wstring& executable) {
+    executable.clear();
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kInstallMetadataKey, 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS) return false;
+    DWORD type = 0;
+    DWORD bytes = 0;
+    LONG query = RegQueryValueExW(key, kHostExecutableValue, nullptr, &type, nullptr, &bytes);
+    if (query != ERROR_SUCCESS || type != REG_SZ || bytes < 2 * sizeof(wchar_t) ||
+        bytes > 32768 * sizeof(wchar_t) || bytes % sizeof(wchar_t) != 0) {
+        RegCloseKey(key);
+        return false;
+    }
+    executable.assign(bytes / sizeof(wchar_t), L'\0');
+    query = RegQueryValueExW(key, kHostExecutableValue, nullptr, &type,
+                             reinterpret_cast<BYTE*>(executable.data()), &bytes);
+    RegCloseKey(key);
+    if (query != ERROR_SUCCESS || type != REG_SZ || bytes < 2 * sizeof(wchar_t) ||
+        bytes % sizeof(wchar_t) != 0) return false;
+    executable.resize(bytes / sizeof(wchar_t));
+    if (executable.empty() || executable.back() != L'\0') return false;
+    executable.pop_back();
+    if (executable.empty() || executable.find_first_of(L"\"\r\n") != std::wstring::npos ||
+        executable.find(L'\0') != std::wstring::npos) return false;
+    return true;
 }
 
 bool writeRegString(const std::wstring& path, const wchar_t* name, const std::wstring& value) {
@@ -290,14 +348,9 @@ HRESULT STDMETHODCALLTYPE XMJDTip::ActivateEx(ITfThreadMgr* manager, TfClientId 
         threadManager_->AddRef();
         clientId_ = clientId;
         activationFlags_ = flags;
-        uiLess_ = false;
-        ComPtr<ITfThreadMgrEx> extendedThreadManager;
-        if (SUCCEEDED(threadManager_->QueryInterface(IID_PPV_ARGS(extendedThreadManager.GetAddressOf())))) {
-            DWORD activeFlags = 0;
-            if (SUCCEEDED(extendedThreadManager->GetActiveFlags(&activeFlags))) {
-                uiLess_ = (activeFlags & TF_TMF_UIELEMENTENABLEDONLY) != 0;
-            }
-        }
+        // 是否由应用自绘候选只能看 BeginUIElement 的 show 返回值；
+        // TF_TMF_UIELEMENTENABLEDONLY 只说明线程处于 UILess 模式，
+        // 应用仍可能允许输入法自己画候选窗，不能据此关掉候选。
         HRESULT hr = threadManager_->QueryInterface(IID_PPV_ARGS(&keystrokeManager_));
         if (FAILED(hr)) { deactivate(); return hr; }
         hr = threadManager_->QueryInterface(IID_PPV_ARGS(&uiElementManager_));
@@ -465,25 +518,8 @@ bool XMJDTip::createEngineSession() {
     if (!activated_ || !context_ || contextEpoch_ == 0 || !foreground_ || resettingContext_ ||
         contextUnavailable_ || composition_ || !isCurrentContext(context_)) return false;
     if (!pipe_.connected()) {
-        HKEY key = nullptr;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kInstallMetadataKey, 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS) return false;
-        DWORD type = 0;
-        DWORD bytes = 0;
-        LONG query = RegQueryValueExW(key, kHostExecutableValue, nullptr, &type, nullptr, &bytes);
-        if (query != ERROR_SUCCESS || type != REG_SZ || bytes < 2 * sizeof(wchar_t) ||
-            bytes > 32768 * sizeof(wchar_t) || bytes % sizeof(wchar_t) != 0) {
-            RegCloseKey(key);
-            return false;
-        }
-        std::wstring executable(bytes / sizeof(wchar_t), L'\0');
-        query = RegQueryValueExW(key, kHostExecutableValue, nullptr, &type, reinterpret_cast<BYTE*>(executable.data()), &bytes);
-        RegCloseKey(key);
-        if (query != ERROR_SUCCESS || type != REG_SZ || bytes < 2 * sizeof(wchar_t) ||
-            bytes % sizeof(wchar_t) != 0) return false;
-        executable.resize(bytes / sizeof(wchar_t));
-        if (executable.back() != L'\0') return false;
-        executable.pop_back();
-        if (executable.find_first_of(L"\"\r\n") != std::wstring::npos || executable.find(L'\0') != std::wstring::npos) return false;
+        std::wstring executable;
+        if (!readHostExecutable(executable)) return false;
         const std::filesystem::path hostPath(executable);
         std::error_code error;
         if (!hostPath.is_absolute() || !std::filesystem::is_regular_file(hostPath, error)) return false;
@@ -719,36 +755,48 @@ void XMJDTip::updateCandidateUi(const Snapshot& snapshot, TfEditCookie cookie) {
         return;
     }
     if (!candidateElement_) candidateElement_ = new (std::nothrow) CandidateElement(this, context_);
-    if (!candidateElement_ || !uiElementManager_) return;
+    if (!candidateElement_) return;
     ComPtr<CandidateElement> element = candidateElement_;
-    ComPtr<ITfUIElementMgr> manager = uiElementManager_;
     const std::uint64_t epoch = contextEpoch_;
     element->update(snapshot);
-    if (uiElementId_ == TF_INVALID_UIELEMENTID) {
-        BOOL show = uiLess_ ? FALSE : TRUE;
-        DWORD id = TF_INVALID_UIELEMENTID;
-        const HRESULT hr = manager->BeginUIElement(element.Get(), &show, &id);
-        if (FAILED(hr)) { showCandidateWindow(false); return; }
-        if (element.Get() != candidateElement_ || epoch != contextEpoch_) {
-            if (id != TF_INVALID_UIELEMENTID) manager->EndUIElement(id);
-            return;
+    if (!uiElementAttempted_) {
+        uiElementAttempted_ = true;
+        // 候选由谁绘制由 BeginUIElement 的 show 参数决定：应用要求自己画
+        // （UILess 的终端/编辑器）时返回 FALSE，此时不能抢着画；调用失败或
+        // 应用不支持 UIElement 时仍用自带候选窗，否则只能盲打。
+        uiElementShow_ = true;
+        if (uiElementManager_) {
+            ComPtr<ITfUIElementMgr> manager = uiElementManager_;
+            BOOL show = TRUE;
+            DWORD id = TF_INVALID_UIELEMENTID;
+            const HRESULT hr = manager->BeginUIElement(element.Get(), &show, &id);
+            if (element.Get() != candidateElement_ || epoch != contextEpoch_) {
+                if (SUCCEEDED(hr) && id != TF_INVALID_UIELEMENTID) manager->EndUIElement(id);
+                return;
+            }
+            if (SUCCEEDED(hr)) {
+                uiElementId_ = id;
+                uiElementShow_ = show != FALSE;
+            } else {
+                logCandidateStage("begin-ui-element-failed");
+            }
         }
-        uiElementId_ = id;
-        uiElementShow_ = show != FALSE && !uiLess_;
         element->Show(uiElementShow_ ? TRUE : FALSE);
     }
     if (element.Get() != candidateElement_ || epoch != contextEpoch_) return;
-    if (uiElementId_ != TF_INVALID_UIELEMENTID) manager->UpdateUIElement(uiElementId_);
+    if (uiElementId_ != TF_INVALID_UIELEMENTID && uiElementManager_) uiElementManager_->UpdateUIElement(uiElementId_);
     if (element.Get() != candidateElement_ || epoch != contextEpoch_) return;
     if (uiElementShow_ && element->isShown()) {
         if (!positionCandidateWindow(cookie)) showCandidateWindow(false);
     } else {
+        if (!uiElementShow_) logCandidateStage("app-draws-ui");
         showCandidateWindow(false);
     }
 }
 
 void XMJDTip::closeCandidateUi() noexcept {
     uiElementShow_ = false;
+    uiElementAttempted_ = false;
     showCandidateWindow(false);
     CandidateElement* element = std::exchange(candidateElement_, nullptr);
     const DWORD id = std::exchange(uiElementId_, TF_INVALID_UIELEMENTID);
@@ -758,7 +806,10 @@ void XMJDTip::closeCandidateUi() noexcept {
 }
 
 bool XMJDTip::positionCandidateWindow(TfEditCookie cookie) {
-    if (!candidateWindow_ || !context_ || !composition_ || !candidateElement_ || !uiElementShow_ || uiLess_) return false;
+    if (!candidateWindow_ || !context_ || !composition_ || !candidateElement_ || !uiElementShow_) {
+        logCandidateStage("skip:no-window-or-state");
+        return false;
+    }
     const std::uint64_t epoch = contextEpoch_;
     ComPtr<ITfContext> context = context_;
     ComPtr<ITfComposition> composition = composition_;
@@ -768,35 +819,75 @@ bool XMJDTip::positionCandidateWindow(TfEditCookie cookie) {
     if (FAILED(composition->GetRange(&range)) || !range || FAILED(context->GetActiveView(&view)) || !view) {
         releaseInterface(range);
         releaseInterface(view);
+        logCandidateStage("skip:no-range-or-view");
         return false;
     }
     RECT caret{};
     BOOL clipped = FALSE;
     HRESULT hr = view->GetTextExt(cookie, range, &caret, &clipped);
+    if (FAILED(hr)) {
+        // 少数应用对整段 composition 取不到屏幕位置，退到编码末端的折叠 range。
+        hr = range->Collapse(cookie, TF_ANCHOR_END);
+        if (SUCCEEDED(hr)) hr = view->GetTextExt(cookie, range, &caret, &clipped);
+    }
     range->Release();
     view->Release();
-    if (FAILED(hr) || epoch != contextEpoch_ || context.Get() != context_ || element.Get() != candidateElement_ ||
-        !uiElementShow_ || !element->isShown() || !isCurrentContext(context.Get()) || epoch != contextEpoch_) return false;
+    if (FAILED(hr)) {
+        logCandidateStage("skip:text-ext");
+        return false;
+    }
+    if (epoch != contextEpoch_ || context.Get() != context_ || element.Get() != candidateElement_ ||
+        !uiElementShow_ || !element->isShown()) {
+        logCandidateStage("skip:stale");
+        return false;
+    }
+    if (!isCurrentContext(context.Get())) {
+        logCandidateStage("skip:focus");
+        return false;
+    }
     HMONITOR monitor = MonitorFromRect(&caret, MONITOR_DEFAULTTONEAREST);
     MONITORINFO info{sizeof(info)};
-    if (!monitor || !GetMonitorInfoW(monitor, &info)) return false;
+    if (!monitor || !GetMonitorInfoW(monitor, &info)) {
+        logCandidateStage("skip:monitor");
+        return false;
+    }
     const int dpi = static_cast<int>(GetDpiForWindow(candidateWindow_));
     if (!candidateRenderer_) candidateRenderer_ = std::make_unique<CandidateRenderer>();
-    if (!candidateRenderer_) return false;
+    if (!candidateRenderer_) {
+        logCandidateStage("skip:renderer");
+        return false;
+    }
     const CandidateSnapshot& snapshot = element->snapshot();
     if (!candidateRenderer_->prepare(snapshot.values, snapshot.selected, kMaxPopupRows, dpi == 0 ? 96 : dpi)) {
+        logCandidateStage("skip:layout");
         return false;
     }
     const xmjd::CandidateLayout& layout = candidateRenderer_->layout();
     const int width = layout.width;
     const int height = layout.height;
+    // 窗口比面板大一圈投影留白：面板左上角要落在光标下方，所以窗口原点要外扩。
+    const int margin = candidateRenderer_->shadowMargin();
     LONG x = caret.left;
     LONG y = caret.bottom;
     if (y + height > info.rcWork.bottom) y = caret.top - height;
     x = std::max(info.rcWork.left, std::min(x, info.rcWork.right - width));
     y = std::max(info.rcWork.top, std::min(y, info.rcWork.bottom - height));
-    if (!SetWindowPos(candidateWindow_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE)) return false;
-    return candidateRenderer_->paint(candidateWindow_, dpi == 0 ? 96 : dpi, x, y);
+    if (!SetWindowPos(candidateWindow_, HWND_TOPMOST, x - margin, y - margin,
+                      width + margin * 2, height + margin * 2, SWP_NOACTIVATE)) {
+        logCandidateStage("skip:set-window-pos");
+        return false;
+    }
+    if (!candidateRenderer_->paint(candidateWindow_, dpi == 0 ? 96 : dpi, x, y)) {
+        logCandidateStage("skip:paint");
+        return false;
+    }
+    // UpdateLayeredWindow 只更新内容，不会让隐藏窗口出现，必须显式显示。
+    if (!showCandidateWindow(true)) {
+        logCandidateStage("skip:show");
+        return false;
+    }
+    logCandidateStage("shown");
+    return true;
 }
 
 bool XMJDTip::createCandidateWindow() {
@@ -822,7 +913,7 @@ bool XMJDTip::createCandidateWindow() {
 
 bool XMJDTip::showCandidateWindow(bool show) {
     if (!candidateWindow_) return !show;
-    show = show && !uiLess_ && uiElementShow_;
+    show = show && uiElementShow_;
     ShowWindow(candidateWindow_, show ? SW_SHOWNOACTIVATE : SW_HIDE);
     if (show) InvalidateRect(candidateWindow_, nullptr, TRUE);
     return true;
@@ -1063,7 +1154,9 @@ bool XMJDTip::translateKey(UINT virtualKey, LPARAM keyData, UINT& keycode, UINT&
     if (!GetKeyboardState(state)) return false;
     modifiers = rimeModifiers();
     const bool altGr = (state[VK_RMENU] & 0x80) != 0 && (state[VK_LCONTROL] & 0x80) != 0;
-    state[VK_SHIFT] = state[VK_LSHIFT] = state[VK_RSHIFT] = 0;
+    // Shift 必须留着：标点是靠"实际打出来的那个字符"查表的（Shift+/ 是 '?'，
+    // 不是 '/'），清掉 Shift 会让引擎把 ？ 打成 、。字母在下面再折回小写，
+    // 保证方案里的字母键位和以前一致。
     state[VK_CAPITAL] &= 0x80;
     if (!altGr) {
         state[VK_CONTROL] = state[VK_LCONTROL] = state[VK_RCONTROL] = 0;
@@ -1078,6 +1171,10 @@ bool XMJDTip::translateKey(UINT virtualKey, LPARAM keyData, UINT& keycode, UINT&
         codepoint = 0x10000 + ((translated[0] - 0xd800) << 10) + (translated[1] - 0xdc00);
     }
     if (codepoint < 0x20 || (codepoint >= 0x7f && codepoint < 0xa0)) return false;
+    if (codepoint >= 'A' && codepoint <= 'Z') codepoint += 'a' - 'A';
+    // 标点表是按"字符"配的（'?' : ？ 、 '/' : ､），实测带 Shift 位反而匹配不上，
+    // 字符本身已经带上了 Shift 的结果，这里把 Shift 位清掉。
+    modifiers &= ~kMaskShift;
     keycode = codepoint <= 0xff ? codepoint : 0x01000000u | codepoint;
     return true;
 }
@@ -1283,6 +1380,10 @@ LRESULT CALLBACK XMJDTip::popupWndProc(HWND window, UINT message, WPARAM wParam,
     }
     if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
     if (message == WM_ERASEBKGND) return 1;
+    if (message == WM_RBUTTONUP && owner) {
+        owner->showContextMenu(window);
+        return 0;
+    }
     if (message == WM_PAINT) {
         PAINTSTRUCT paint{};
         BeginPaint(window, &paint);
@@ -1303,6 +1404,44 @@ LRESULT CALLBACK XMJDTip::popupWndProc(HWND window, UINT message, WPARAM wParam,
         return 0;
     }
     return DefWindowProcW(window, message, wParam, lParam);
+}
+
+// 输入法在 Windows 上没有语言栏按钮，安装完成后如果没记住开始菜单入口，
+// 就再也找不到设置程序；在候选窗上补一个右键菜单作为常驻入口。
+void XMJDTip::showContextMenu(HWND window) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, kMenuSettings, L"星猫键道设置…");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kMenuUserData, L"打开用户目录");
+    AppendMenuW(menu, MF_STRING, kMenuLogs, L"打开日志目录");
+    POINT point{};
+    if (!GetCursorPos(&point)) {
+        DestroyMenu(menu);
+        return;
+    }
+    const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+                                        point.x, point.y, 0, window, nullptr);
+    DestroyMenu(menu);
+    PostMessageW(window, WM_NULL, 0, 0);
+    if (command == 0) return;
+
+    const auto root = xmjd::win::dataRoot();
+    if (command == kMenuSettings) {
+        std::wstring executable;
+        if (!readHostExecutable(executable)) return;
+        const std::filesystem::path directory = std::filesystem::path(executable).parent_path();
+        const std::filesystem::path settings = directory / L"XMJDSettings.exe";
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(settings, error)) return;
+        ShellExecuteW(nullptr, L"open", settings.c_str(), nullptr, directory.c_str(), SW_SHOWNORMAL);
+    } else if (command == kMenuUserData) {
+        if (!root.empty()) ShellExecuteW(nullptr, L"open", root.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    } else if (command == kMenuLogs) {
+        if (!root.empty()) {
+            ShellExecuteW(nullptr, L"open", (root / L"Logs").c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+    }
 }
 
 CandidateElement::CandidateElement(XMJDTip* owner, ITfContext* context) : owner_(owner), context_(context) {
@@ -1351,7 +1490,7 @@ HRESULT STDMETHODCALLTYPE CandidateElement::Show(BOOL show) {
         shown_ = FALSE;
         return TF_E_DISCONNECTED;
     }
-    shown_ = show != FALSE && owner_->uiElementShow_ && !owner_->uiLess_ ? TRUE : FALSE;
+    shown_ = show != FALSE && owner_->uiElementShow_ ? TRUE : FALSE;
     owner_->candidateVisibilityChanged(shown_ != FALSE);
     return S_OK;
 }

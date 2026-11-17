@@ -11,6 +11,7 @@
 #include <mutex>
 
 #include "Tip.h"
+#include "../Common/CandidatePainter.h"
 
 using namespace Gdiplus;
 
@@ -66,58 +67,6 @@ bool systemPrefersDark() {
     return light == 0;
 }
 
-// Converts a resolved pair; `dark` selects the variant.
-Color pairColor(const ColorPair& pair, bool dark, double opacity) {
-    const StyleColor& value = dark ? pair.dark : pair.light;
-    const double alpha = std::min(1.0, std::max(0.0, value.alpha * opacity));
-    return Color(static_cast<BYTE>(std::lround(alpha * 255)),
-                 static_cast<BYTE>(std::lround(std::clamp(value.red, 0.0, 1.0) * 255)),
-                 static_cast<BYTE>(std::lround(std::clamp(value.green, 0.0, 1.0) * 255)),
-                 static_cast<BYTE>(std::lround(std::clamp(value.blue, 0.0, 1.0) * 255)));
-}
-
-void buildRoundedPath(GraphicsPath& path, const Rect& rect, int radius) {
-    const int limit = std::min({radius, rect.Width / 2, rect.Height / 2});
-    if (limit <= 0) {
-        path.AddRectangle(rect);
-        return;
-    }
-    const int diameter = limit * 2;
-    path.AddArc(rect.X, rect.Y, diameter, diameter, 180, 90);
-    path.AddArc(rect.X + rect.Width - diameter, rect.Y, diameter, diameter, 270, 90);
-    path.AddArc(rect.X + rect.Width - diameter, rect.Y + rect.Height - diameter, diameter, diameter, 0, 90);
-    path.AddArc(rect.X, rect.Y + rect.Height - diameter, diameter, diameter, 90, 90);
-    path.CloseFigure();
-}
-
-void fillRounded(Graphics& graphics, const Rect& rect, int radius, const Color& start, const Color& end) {
-    GraphicsPath path;
-    buildRoundedPath(path, rect, radius);
-    if (start.GetValue() == end.GetValue()) {
-        SolidBrush brush(start);
-        graphics.FillPath(&brush, &path);
-        return;
-    }
-    LinearGradientBrush brush(Point(rect.X, rect.Y), Point(rect.X + rect.Width, rect.Y + rect.Height), start, end);
-    graphics.FillPath(&brush, &path);
-}
-
-void drawText(Graphics& graphics, const std::wstring& text, const std::wstring& face, int pixelSize,
-              const Color& color, REAL x, REAL y, REAL width, REAL height) {
-    if (text.empty()) return;
-    FontFamily family(face.c_str());
-    if (family.GetLastStatus() != Ok) return;
-    Font font(&family, static_cast<REAL>(pixelSize), FontStyleRegular, UnitPixel);
-    if (font.GetLastStatus() != Ok) return;
-    SolidBrush brush(color);
-    StringFormat format(StringFormat::GenericTypographic());
-    format.SetFormatFlags(StringFormatFlagsNoWrap | StringFormatFlagsMeasureTrailingSpaces);
-    format.SetLineAlignment(StringAlignmentCenter);
-    format.SetTrimming(StringTrimmingEllipsisCharacter);
-    RectF bounds(x, y, std::max<REAL>(1, width), height);
-    graphics.DrawString(text.c_str(), static_cast<INT>(text.size()), &font, bounds, &format, &brush);
-}
-
 std::uint64_t styleStamp(const std::filesystem::path& path) {
     std::error_code ec;
     const auto time = std::filesystem::last_write_time(path, ec);
@@ -169,13 +118,14 @@ bool CandidateRenderer::prepare(const std::vector<CandidateValue>& values, UINT 
     if (values.empty()) return false;
     reloadIfNeeded();
     const std::size_t count = std::min<std::size_t>(values.size(), std::max<UINT>(1, maxRows));
-    std::vector<CandidateItem> items;
-    items.reserve(count);
+    items_.clear();
+    items_.reserve(count);
     for (std::size_t index = 0; index < count; ++index) {
-        items.push_back(CandidateItem{values[index].label, values[index].text, values[index].comment});
+        items_.push_back(CandidateItem{values[index].label, values[index].text, values[index].comment});
     }
-    layout_ = xmjd::layoutCandidates(style_, items, dpi,
+    layout_ = xmjd::layoutCandidates(style_, items_, dpi,
                                     [this](std::wstring_view text, int size) { return measureText(text, size); });
+    shadowMargin_ = xmjd::candidateShadowMargin(dpi);
     values_.assign(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(count));
     selected_ = std::min<UINT>(selected, static_cast<UINT>(count - 1));
     return layout_.width > 0 && layout_.height > 0;
@@ -196,9 +146,11 @@ bool CandidateRenderer::repaint(HWND window, int dpi) {
 }
 
 bool CandidateRenderer::paintInternal(HWND window, int dpi, int x, int y) {
-    if (layout_.width <= 0 || layout_.height <= 0) return false;
-    const int width = layout_.width;
-    const int height = layout_.height;
+    if (layout_.width <= 0 || layout_.height <= 0 || items_.empty()) return false;
+    const int margin = shadowMargin_ > 0 ? shadowMargin_ : xmjd::candidateShadowMargin(dpi);
+    // 窗口比面板大一圈：投影画在面板外，必须有自己的像素位置。
+    const int width = layout_.width + margin * 2;
+    const int height = layout_.height + margin * 2;
     HDC screen = GetDC(nullptr);
     if (!screen) return false;
     HDC memory = CreateCompatibleDC(screen);
@@ -222,74 +174,39 @@ bool CandidateRenderer::paintInternal(HWND window, int dpi, int x, int y) {
     }
     HGDIOBJ previous = SelectObject(memory, bitmap);
     const bool dark = systemPrefersDark();
-    const CandidateMetrics metrics = xmjd::candidateMetrics(style_, dpi);
-    const double opacity = style_.opacity;
 
     {
-        Graphics graphics(memory);
+        // UpdateLayeredWindow(ULW_ALPHA) 只接受 32bpp 预乘 alpha 的位图，而 GDI+
+        // 通过 HDC 绘制时不会写 alpha 通道（结果是整窗全透明）。把 DIB 内存
+        // 直接包成 PARGB 的 Bitmap 再画，alpha 才会正确。
+        Bitmap surface(width, height, width * 4, PixelFormat32bppPARGB, static_cast<BYTE*>(bits));
+        Graphics graphics(&surface);
+        if (surface.GetLastStatus() != Ok || graphics.GetLastStatus() != Ok) {
+            SelectObject(memory, previous);
+            DeleteObject(bitmap);
+            DeleteDC(memory);
+            ReleaseDC(nullptr, screen);
+            return false;
+        }
+        graphics.SetCompositingMode(CompositingModeSourceCopy);
+        graphics.Clear(Color(0, 0, 0, 0));
+        graphics.SetCompositingMode(CompositingModeSourceOver);
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
         graphics.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
-        graphics.SetCompositingMode(CompositingModeSourceOver);
-        const Color background = pairColor(style_.background, dark, opacity);
-        const Color backgroundEnd = style_.decoration
-            ? pairColor(style_.decoration->backgroundEnd, dark, opacity)
-            : background;
-        const int radius = xmjd::stylePixels(style_.cornerRadius, dpi);
-        fillRounded(graphics, Rect(0, 0, width, height), radius, background, backgroundEnd);
-
-        const int itemRadius = xmjd::stylePixels(style_.itemRadius, dpi);
-        const Color textColor = pairColor(style_.text, dark, opacity);
-        const Color selectedText = style_.decoration
-            ? pairColor(style_.decoration->selectedText, dark, opacity)
-            : Color(255, 255, 255, 255);
-        const Color secondary = style_.decoration
-            ? pairColor(style_.decoration->secondaryText, dark, 1.0)
-            : pairColor(style_.text, dark, 0.7);
-
-        for (std::size_t index = 0; index < layout_.items.size(); ++index) {
-            const CandidateBox& box = layout_.items[index];
-            const bool isSelected = index == selected_;
-            if (isSelected) {
-                const Color start = style_.decoration
-                    ? pairColor(style_.decoration->highlightMiddle, dark, opacity)
-                    : pairColor(style_.accent, dark, opacity);
-                const Color end = style_.decoration
-                    ? pairColor(style_.decoration->highlightEnd, dark, opacity)
-                    : start;
-                fillRounded(graphics, Rect(box.x, box.y, box.width, box.height), itemRadius, start, end);
-            }
-            REAL cursor = static_cast<REAL>(box.x + metrics.padX);
-            const REAL baseline = static_cast<REAL>(box.y);
-            const REAL rowHeight = static_cast<REAL>(box.height);
-            if (style_.showLabels && !values_[index].label.empty()) {
-                const int labelWidth = measureText(values_[index].label, metrics.labelSize);
-                drawText(graphics, values_[index].label, resolvedFace_, metrics.labelSize,
-                         isSelected ? selectedText : secondary, cursor, baseline,
-                         static_cast<REAL>(labelWidth), rowHeight);
-                cursor += labelWidth + metrics.labelGap;
-            }
-            const int textWidth = measureText(values_[index].text, metrics.fontSize);
-            drawText(graphics, values_[index].text, resolvedFace_, metrics.fontSize,
-                     isSelected ? selectedText : textColor, cursor, baseline, static_cast<REAL>(textWidth),
-                     rowHeight);
-            cursor += textWidth;
-            if (style_.showComments && !values_[index].comment.empty()) {
-                cursor += metrics.commentGap;
-                drawText(graphics, values_[index].comment, resolvedFace_, metrics.labelSize, secondary, cursor,
-                         baseline, static_cast<REAL>(width - cursor - metrics.padding), rowHeight);
-            }
-        }
+        xmjd::paintCandidateSurface(graphics, POINT{0, 0}, resolvedFace_, style_, items_, layout_,
+                                    selected_, dpi, dark);
     }
 
-    SelectObject(memory, previous);
     BLENDFUNCTION blend{};
     blend.BlendOp = AC_SRC_OVER;
     blend.SourceConstantAlpha = 255;
     blend.AlphaFormat = AC_SRC_ALPHA;
-    POINT destination{x, y};
+    POINT destination{x - margin, y - margin};
     SIZE size{width, height};
     POINT source{0, 0};
+    // 位图必须仍在 memory DC 里，UpdateLayeredWindow 才能读到图内容。
     const BOOL painted = UpdateLayeredWindow(window, screen, &destination, &size, memory, &source, 0, &blend, ULW_ALPHA);
+    SelectObject(memory, previous);
     DeleteObject(bitmap);
     DeleteDC(memory);
     ReleaseDC(nullptr, screen);
@@ -297,10 +214,13 @@ bool CandidateRenderer::paintInternal(HWND window, int dpi, int x, int y) {
 }
 
 int CandidateRenderer::hitTest(POINT client) const {
+    // 客户区含投影留白，候选盒坐标是面板内的，先换算回面板坐标。
+    const int margin = shadowMargin_;
+    const POINT point{client.x - margin, client.y - margin};
     for (std::size_t index = 0; index < layout_.items.size(); ++index) {
         const CandidateBox& box = layout_.items[index];
-        if (client.x >= box.x && client.x < box.x + box.width && client.y >= box.y &&
-            client.y < box.y + box.height) {
+        if (point.x >= box.x && point.x < box.x + box.width && point.y >= box.y &&
+            point.y < box.y + box.height) {
             return static_cast<int>(index);
         }
     }

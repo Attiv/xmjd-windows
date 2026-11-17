@@ -2,44 +2,95 @@
 #include <windows.h>
 #include "resource.h"
 
-IDD_SETTINGS DIALOGEX 0, 0, 352, 436
-STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+// 布局按 DLU 写：9pt 微软雅黑下 vDLU≈2.5px、hDLU≈2.25px。
+// 440x324 DLU ≈ 990x810 px，1080p 与 125% 缩放都放得下。
+// 分组只靠间距与字重（三个栏位 x=10 / 162 / 312），不放卡片、不画色条。
+IDD_SETTINGS DIALOGEX 0, 0, 440, 324
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN
 CAPTION "星猫键道设置"
 FONT 9, "Microsoft YaHei UI", 400, 0, 1
 BEGIN
-    ICON            1, IDC_APPICON, 14, 12, 20, 20
-    LTEXT           "星猫键道 Windows", IDC_TITLE, 42, 12, 240, 12
-    LTEXT           "", IDC_VERSION, 42, 26, 240, 10
-    LTEXT           "引擎状态：正在检查…", IDC_STATUS, 42, 42, 296, 26
+    ICON            1, IDC_APPICON, 10, 8, 20, 20
+    LTEXT           "星猫键道", IDC_TITLE, 36, 6, 180, 16, SS_NOPREFIX
+    LTEXT           "", IDC_VERSION, 36, 24, 180, 9, SS_NOPREFIX
+    LTEXT           "引擎状态：正在检查…", IDC_STATUS, 36, 36, 392, 12, SS_NOPREFIX
 
-    GROUPBOX        "输入方案", -1, 14, 74, 324, 100
-    LISTBOX         IDC_SCHEMA_LIST, 26, 90, 300, 52, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "方案决定输入编码。想先用拼音验证，请选择“袖珍简化字拼音”。", IDC_SCHEMA_HINT, 26, 144, 300, 10
-    LTEXT           "切换后点击“应用并部署”，可能需要一分钟编译词典。", IDC_SCHEMA_HELP, 26, 156, 300, 10
+    CONTROL         "", IDC_STYLE_PREVIEW, "Static", SS_OWNERDRAW, 16, 60, 408, 46
 
-    PUSHBUTTON      "应用并部署", IDC_APPLY, 14, 180, 80, 18, BS_DEFPUSHBUTTON
-    PUSHBUTTON      "重新部署", IDC_REDEPLOY, 100, 180, 64, 18
-    PUSHBUTTON      "启动引擎", IDC_START_HOST, 170, 180, 64, 18
-    PUSHBUTTON      "语言设置", IDC_OPEN_LANGUAGE, 240, 180, 64, 18
-    PUSHBUTTON      "关闭", IDCANCEL, 310, 180, 28, 18
+    LISTBOX         IDC_SCHEMA_LIST, 10, 138, 140, 34, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "应用并部署", IDC_APPLY, 10, 178, 60, 14, BS_DEFPUSHBUTTON
+    PUSHBUTTON      "重新部署", IDC_REDEPLOY, 74, 178, 58, 14
+    LTEXT           "首次编译词典约需一分钟。", IDC_SCHEMA_HINT, 10, 194, 140, 8, SS_NOPREFIX
 
-    GROUPBOX        "方案来源", -1, 14, 206, 324, 74
-    LTEXT           "当前：内置方案", IDC_SOURCE_LABEL, 26, 220, 300, 10
-    PUSHBUTTON      "选择目录…", IDC_CHOOSE_SOURCE, 26, 234, 66, 16
-    PUSHBUTTON      "打开来源", IDC_OPEN_SOURCE, 98, 234, 64, 16
-    PUSHBUTTON      "移除导入方案", IDC_REMOVE_SOURCE, 168, 234, 78, 16
-    LTEXT           "可以指向鼠须管或其他 Rime 方案目录：只读取并复制到星猫自己的用户目录，不改动来源。导入后在方案列表选择并应用。", -1, 26, 253, 300, 22
+    LTEXT           "当前：内置方案", IDC_SOURCE_LABEL, 10, 234, 140, 8, SS_NOPREFIX
+    PUSHBUTTON      "选择目录…", IDC_CHOOSE_SOURCE, 10, 246, 56, 13
+    PUSHBUTTON      "打开来源", IDC_OPEN_SOURCE, 70, 246, 44, 13
+    PUSHBUTTON      "改回内置方案", IDC_REMOVE_SOURCE, 10, 262, 58, 13
+    LTEXT           "选哪个目录，引擎就用哪个目录；星猫只读不写。", IDC_SCHEMA_HELP, 10, 278, 140, 18, SS_NOPREFIX
 
-    GROUPBOX        "候选皮肤", -1, 14, 288, 324, 90
-    LTEXT           "皮肤：", -1, 26, 304, 26, 10
-    COMBOBOX        IDC_STYLE_LIST, 52, 302, 140, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON      "导入…", IDC_IMPORT_STYLE, 198, 302, 44, 16
-    PUSHBUTTON      "导出…", IDC_EXPORT_STYLE, 246, 302, 40, 16
-    PUSHBUTTON      "目录", IDC_OPEN_STYLES, 290, 302, 36, 16
-    LTEXT           "当前：系统简约", IDC_STYLE_DETAIL, 26, 324, 300, 10
-    LTEXT           "与 Mac 版通用同一份皮肤 JSON（xmjd.candidate-style v1）。选中即生效，下一句输入使用新样式，不需要重新部署。", IDC_STYLE_HINT, 26, 338, 300, 32
+    COMBOBOX        IDC_STYLE_LIST, 162, 138, 138, 70, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "导入…", IDC_IMPORT_STYLE, 162, 152, 42, 13
+    PUSHBUTTON      "导出…", IDC_EXPORT_STYLE, 208, 152, 42, 13
+    PUSHBUTTON      "目录", IDC_OPEN_STYLES, 254, 152, 46, 13
 
-    PUSHBUTTON      "打开用户目录", IDC_OPEN_USER, 14, 386, 80, 18
-    PUSHBUTTON      "打开日志", IDC_OPEN_LOG, 100, 386, 64, 18
-    LTEXT           "添加方法：Windows 设置 → 时间和语言 → 语言和区域 → 中文 → 键盘 → 添加键盘 → XMJD，然后按 Win+Space 切换。", -1, 14, 408, 324, 24
+    COMBOBOX        IDC_STYLE_FONT, 162, 166, 138, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+
+    LTEXT           "布局", -1, 162, 180, 24, 8, SS_NOPREFIX
+    COMBOBOX        IDC_STYLE_LAYOUT, 188, 178, 56, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+    AUTOCHECKBOX    "深色预览", IDC_STYLE_DARK, 250, 179, 50, 9, WS_TABSTOP
+
+    LTEXT           "字号", -1, 162, 192, 26, 8, SS_NOPREFIX
+    EDITTEXT        IDC_STYLE_SIZE, 190, 190, 30, 11, ES_NUMBER | ES_RIGHT
+    LTEXT           "行高", -1, 222, 192, 26, 8, SS_NOPREFIX
+    EDITTEXT        IDC_STYLE_ROW, 250, 190, 30, 11, ES_NUMBER | ES_RIGHT
+
+    LTEXT           "注音", -1, 162, 204, 26, 8, SS_NOPREFIX
+    EDITTEXT        IDC_STYLE_COMMENT_SIZE, 190, 202, 30, 11, ES_NUMBER | ES_RIGHT
+    LTEXT           "宽度", -1, 222, 204, 26, 8, SS_NOPREFIX
+    EDITTEXT        IDC_STYLE_MAXWIDTH, 250, 202, 30, 11, ES_NUMBER | ES_RIGHT
+
+    LTEXT           "内距", -1, 162, 216, 26, 8, SS_NOPREFIX
+    EDITTEXT        IDC_STYLE_PADDING, 190, 214, 30, 11, ES_NUMBER | ES_RIGHT
+    LTEXT           "项距", -1, 222, 216, 26, 8, SS_NOPREFIX
+    EDITTEXT        IDC_STYLE_ITEM_SPACING, 250, 214, 30, 11, ES_NUMBER | ES_RIGHT
+
+    LTEXT           "横边", -1, 162, 228, 26, 8, SS_NOPREFIX
+    EDITTEXT        IDC_STYLE_PAD_H, 190, 226, 30, 11, ES_NUMBER | ES_RIGHT
+    LTEXT           "竖边", -1, 222, 228, 26, 8, SS_NOPREFIX
+    EDITTEXT        IDC_STYLE_PAD_V, 250, 226, 30, 11, ES_NUMBER | ES_RIGHT
+
+    LTEXT           "圆角", -1, 162, 240, 26, 8, SS_NOPREFIX
+    EDITTEXT        IDC_STYLE_RADIUS, 190, 238, 30, 11, ES_NUMBER | ES_RIGHT
+    LTEXT           "项角", -1, 222, 240, 26, 8, SS_NOPREFIX
+    EDITTEXT        IDC_STYLE_ITEM_RADIUS, 250, 238, 30, 11, ES_NUMBER | ES_RIGHT
+
+    LTEXT           "透明", -1, 162, 252, 26, 8, SS_NOPREFIX
+    EDITTEXT        IDC_STYLE_OPACITY, 190, 250, 30, 11, ES_NUMBER | ES_RIGHT
+    AUTOCHECKBOX    "编号", IDC_STYLE_LABELS, 228, 251, 26, 9, WS_TABSTOP
+    AUTOCHECKBOX    "注释", IDC_STYLE_COMMENTS, 258, 251, 26, 9, WS_TABSTOP
+
+    PUSHBUTTON      "恢复默认", IDC_STYLE_RESET, 162, 266, 50, 13
+    LTEXT           "当前：系统简约", IDC_STYLE_DETAIL, 216, 268, 84, 8, SS_NOPREFIX
+
+    LTEXT           "背景", -1, 312, 142, 44, 9, SS_NOPREFIX
+    PUSHBUTTON      "", IDC_COLOR_BG, 358, 140, 44, 11, BS_OWNERDRAW
+    LTEXT           "文字", -1, 312, 156, 44, 9, SS_NOPREFIX
+    PUSHBUTTON      "", IDC_COLOR_TEXT, 358, 154, 44, 11, BS_OWNERDRAW
+    LTEXT           "选中文字", -1, 312, 170, 44, 9, SS_NOPREFIX
+    PUSHBUTTON      "", IDC_COLOR_SELECTED_TEXT, 358, 168, 44, 11, BS_OWNERDRAW
+    LTEXT           "序号/注释", -1, 312, 184, 44, 9, SS_NOPREFIX
+    PUSHBUTTON      "", IDC_COLOR_SECONDARY, 358, 182, 44, 11, BS_OWNERDRAW
+    LTEXT           "高亮起", -1, 312, 198, 44, 9, SS_NOPREFIX
+    PUSHBUTTON      "", IDC_COLOR_HIGHLIGHT_START, 358, 196, 44, 11, BS_OWNERDRAW
+    LTEXT           "高亮止", -1, 312, 212, 44, 9, SS_NOPREFIX
+    PUSHBUTTON      "", IDC_COLOR_HIGHLIGHT_END, 358, 210, 44, 11, BS_OWNERDRAW
+    LTEXT           "底渐止", -1, 312, 226, 44, 9, SS_NOPREFIX
+    PUSHBUTTON      "", IDC_COLOR_BG_END, 358, 224, 44, 11, BS_OWNERDRAW
+    LTEXT           "勾选「深色预览」后改的就是深色配色。", IDC_COLOR_HINT, 312, 244, 90, 24, SS_NOPREFIX
+
+    PUSHBUTTON      "语言设置", IDC_OPEN_LANGUAGE, 10, 304, 50, 15
+    PUSHBUTTON      "打开用户目录", IDC_OPEN_USER, 64, 304, 60, 15
+    PUSHBUTTON      "打开日志", IDC_OPEN_LOG, 128, 304, 44, 15
+    PUSHBUTTON      "启动引擎", IDC_START_HOST, 178, 304, 50, 15
+    PUSHBUTTON      "关闭", IDCANCEL, 366, 304, 64, 17
 END
