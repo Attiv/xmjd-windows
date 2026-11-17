@@ -10,7 +10,7 @@
 
 <https://github.com/Attiv/xmjd-windows/releases/download/v0.1.4%2B5/XMJD-0.1.4%2B5-windows-x64-setup.exe>
 
-SHA-256：`PLACEHOLDER_SHA256`
+SHA-256：`39c23185a801e2878c3bf0986e3e2c2d94aa8198ef478aa6d4fb70d0045772bd`
 
 1. 下载 `XMJD-0.1.4+5-windows-x64-setup.exe`。支持 Windows 11 x64；不支持 ARM64。
 2. 运行安装程序并允许管理员安装。程序自动安装并注册 x64/x86 输入法，无需安装开发工具或执行构建命令。
