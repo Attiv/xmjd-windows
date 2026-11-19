@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,7 @@ namespace xmjd::tip {
 
 struct CandidateValue;
 struct CandidateSnapshot;
+class CandidateComposition;
 
 // Paints the candidate popup from the shared "xmjd.candidate-style" document.
 // The same JSON is what the Mac build edits, so skins travel between platforms.
@@ -29,12 +31,16 @@ public:
 
     // Re-reads CandidateStyles\active.json when the file changed.
     void reloadIfNeeded();
+    void setAppearance(xmjd::CandidateStyle style, bool dark);
     const xmjd::CandidateStyle& style() const { return style_; }
 
     // Lays out at most `maxRows` candidates for the given screen DPI.
-    bool prepare(const std::vector<CandidateValue>& values, UINT selected, UINT maxRows, int dpi);
+    bool prepare(const std::vector<CandidateValue>& values, UINT selected, UINT maxRows, int dpi, bool withShadow = true);
     // Paints the prepared layout into the layered window at (x, y).
     bool paint(HWND window, int dpi, int x, int y);
+    HRESULT paintComposited(HWND window);
+    void resetComposition() noexcept;
+    bool paintOpaque(HDC dc, const RECT& client);
     // Repaints using the last content at the same position (DPI changes).
     bool repaint(HWND window, int dpi);
 
@@ -46,6 +52,7 @@ public:
 
 private:
     bool paintInternal(HWND window, int dpi, int x, int y);
+    bool renderPixels(void* bits, int width, int height, int dpi);
     int measureText(std::wstring_view text, int pixelSize);
 
     xmjd::CandidateStyle style_;
@@ -59,6 +66,9 @@ private:
     int lastDpi_ = 0;
     std::uint64_t styleStamp_ = 0;
     std::wstring resolvedFace_;
+    std::optional<bool> hostDark_;
+    std::unique_ptr<CandidateComposition> composition_;
+    std::vector<std::uint32_t> pixels_;
 };
 
 } // namespace xmjd::tip

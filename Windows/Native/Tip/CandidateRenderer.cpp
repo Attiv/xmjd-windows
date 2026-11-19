@@ -1,4 +1,5 @@
 #include "CandidateRenderer.h"
+#include "CandidateComposition.h"
 
 // WIN32_LEAN_AND_MEAN keeps objidl out of windows.h; GDI+ needs IStream and
 // PROPID declarations before gdiplus.h is parsed.
@@ -36,14 +37,14 @@ int CALLBACK countFace(const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM parame
 
 bool faceInstalled(const std::wstring& face) {
     if (face.empty()) return false;
-    HDC dc = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(nullptr);
     if (!dc) return false;
     LOGFONTW format{};
     format.lfCharSet = DEFAULT_CHARSET;
     wcsncpy_s(format.lfFaceName, face.c_str(), _TRUNCATE);
     int count = 0;
     EnumFontFamiliesExW(dc, &format, countFace, reinterpret_cast<LPARAM>(&count), 0);
-    ReleaseDC(nullptr, dc);
+    DeleteDC(dc);
     return count > 0;
 }
 
@@ -55,16 +56,6 @@ std::wstring chooseFace(const std::string& requested) {
     if (faceInstalled(L"Microsoft YaHei UI")) return L"Microsoft YaHei UI";
     if (faceInstalled(L"Microsoft YaHei")) return L"Microsoft YaHei";
     return L"Segoe UI";
-}
-
-bool systemPrefersDark() {
-    DWORD light = 1;
-    DWORD size = sizeof(light);
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size) != ERROR_SUCCESS) {
-        return false;
-    }
-    return light == 0;
 }
 
 std::uint64_t styleStamp(const std::filesystem::path& path) {
@@ -88,6 +79,7 @@ CandidateRenderer::~CandidateRenderer() = default;
 
 void CandidateRenderer::reloadIfNeeded() {
     ensureGdiplus();
+    if (hostDark_.has_value()) return;
     const auto dataRoot = xmjd::win::dataRoot();
     const auto path = xmjd::activeCandidateStylePath(dataRoot);
     const std::uint64_t stamp = styleStamp(path);
@@ -96,6 +88,13 @@ void CandidateRenderer::reloadIfNeeded() {
         styleStamp_ = stamp;
         resolvedFace_ = chooseFace(style_.fontName);
     }
+}
+
+void CandidateRenderer::setAppearance(xmjd::CandidateStyle style, bool dark) {
+    auto face = chooseFace(style.fontName);
+    style_ = std::move(style);
+    resolvedFace_ = std::move(face);
+    hostDark_ = dark;
 }
 
 int CandidateRenderer::measureText(std::wstring_view text, int pixelSize) {
@@ -114,7 +113,7 @@ int CandidateRenderer::measureText(std::wstring_view text, int pixelSize) {
     return static_cast<int>(std::ceil(bounds.Width));
 }
 
-bool CandidateRenderer::prepare(const std::vector<CandidateValue>& values, UINT selected, UINT maxRows, int dpi) {
+bool CandidateRenderer::prepare(const std::vector<CandidateValue>& values, UINT selected, UINT maxRows, int dpi, bool withShadow) {
     if (values.empty()) return false;
     reloadIfNeeded();
     const std::size_t count = std::min<std::size_t>(values.size(), std::max<UINT>(1, maxRows));
@@ -125,7 +124,8 @@ bool CandidateRenderer::prepare(const std::vector<CandidateValue>& values, UINT 
     }
     layout_ = xmjd::layoutCandidates(style_, items_, dpi,
                                     [this](std::wstring_view text, int size) { return measureText(text, size); });
-    shadowMargin_ = xmjd::candidateShadowMargin(dpi);
+    shadowMargin_ = withShadow ? xmjd::candidateShadowMargin(dpi) : 0;
+    lastDpi_ = dpi;
     values_.assign(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(count));
     selected_ = std::min<UINT>(selected, static_cast<UINT>(count - 1));
     return layout_.width > 0 && layout_.height > 0;
@@ -137,6 +137,34 @@ bool CandidateRenderer::paint(HWND window, int dpi, int x, int y) {
     lastY_ = y;
     lastDpi_ = dpi;
     return paintInternal(window, dpi, x, y);
+}
+
+bool CandidateRenderer::paintOpaque(HDC dc, const RECT& client) {
+    const bool dark = hostDark_ ? *hostDark_ : xmjd::windowsCandidateDarkMode();
+    if (g_gdiplusToken && FillRect(dc, &client, GetSysColorBrush(COLOR_WINDOW))) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        graphics.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+        if (xmjd::paintCandidateSurface(graphics, POINT{0, 0}, resolvedFace_, style_, items_, layout_,
+                                        selected_, lastDpi_, dark, false)) return true;
+    }
+    return xmjd::paintOpaqueCandidateSurface(dc, client, resolvedFace_, style_, items_, layout_, selected_, lastDpi_);
+}
+
+HRESULT CandidateRenderer::paintComposited(HWND window) {
+    const int width = layout_.width + shadowMargin_ * 2;
+    const int height = layout_.height + shadowMargin_ * 2;
+    if (width <= 0 || height <= 0 || width > 8192 || height > 8192 ||
+        static_cast<std::size_t>(width) * height > 16 * 1024 * 1024) return E_INVALIDARG;
+    if (!composition_) composition_ = std::make_unique<CandidateComposition>();
+    pixels_.resize(static_cast<std::size_t>(width) * height);
+    if (!renderPixels(pixels_.data(), width, height, lastDpi_)) return E_FAIL;
+    return composition_->present(window, width, height, pixels_.data());
+}
+
+void CandidateRenderer::resetComposition() noexcept {
+    composition_.reset();
+    std::vector<std::uint32_t>().swap(pixels_);
 }
 
 bool CandidateRenderer::repaint(HWND window, int dpi) {
@@ -151,13 +179,9 @@ bool CandidateRenderer::paintInternal(HWND window, int dpi, int x, int y) {
     // 窗口比面板大一圈：投影画在面板外，必须有自己的像素位置。
     const int width = layout_.width + margin * 2;
     const int height = layout_.height + margin * 2;
-    HDC screen = GetDC(nullptr);
-    if (!screen) return false;
-    HDC memory = CreateCompatibleDC(screen);
-    if (!memory) {
-        ReleaseDC(nullptr, screen);
-        return false;
-    }
+    // Use the default palette instead of requiring a desktop-wide screen DC.
+    HDC memory = CreateCompatibleDC(nullptr);
+    if (!memory) return false;
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(info.bmiHeader);
     info.bmiHeader.biWidth = width;
@@ -168,33 +192,26 @@ bool CandidateRenderer::paintInternal(HWND window, int dpi, int x, int y) {
     void* bits = nullptr;
     HBITMAP bitmap = CreateDIBSection(memory, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
     if (!bitmap || !bits) {
+        const DWORD error = GetLastError();
+        if (bitmap) DeleteObject(bitmap);
         DeleteDC(memory);
-        ReleaseDC(nullptr, screen);
+        SetLastError(error);
         return false;
     }
     HGDIOBJ previous = SelectObject(memory, bitmap);
-    const bool dark = systemPrefersDark();
-
-    {
-        // UpdateLayeredWindow(ULW_ALPHA) 只接受 32bpp 预乘 alpha 的位图，而 GDI+
-        // 通过 HDC 绘制时不会写 alpha 通道（结果是整窗全透明）。把 DIB 内存
-        // 直接包成 PARGB 的 Bitmap 再画，alpha 才会正确。
-        Bitmap surface(width, height, width * 4, PixelFormat32bppPARGB, static_cast<BYTE*>(bits));
-        Graphics graphics(&surface);
-        if (surface.GetLastStatus() != Ok || graphics.GetLastStatus() != Ok) {
-            SelectObject(memory, previous);
-            DeleteObject(bitmap);
-            DeleteDC(memory);
-            ReleaseDC(nullptr, screen);
-            return false;
-        }
-        graphics.SetCompositingMode(CompositingModeSourceCopy);
-        graphics.Clear(Color(0, 0, 0, 0));
-        graphics.SetCompositingMode(CompositingModeSourceOver);
-        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-        graphics.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
-        xmjd::paintCandidateSurface(graphics, POINT{0, 0}, resolvedFace_, style_, items_, layout_,
-                                    selected_, dpi, dark);
+    if (!previous || previous == HGDI_ERROR) {
+        const DWORD error = GetLastError();
+        DeleteObject(bitmap);
+        DeleteDC(memory);
+        SetLastError(error);
+        return false;
+    }
+    if (!renderPixels(bits, width, height, dpi)) {
+        SelectObject(memory, previous);
+        DeleteObject(bitmap);
+        DeleteDC(memory);
+        SetLastError(ERROR_INVALID_DATA);
+        return false;
     }
 
     BLENDFUNCTION blend{};
@@ -205,12 +222,27 @@ bool CandidateRenderer::paintInternal(HWND window, int dpi, int x, int y) {
     SIZE size{width, height};
     POINT source{0, 0};
     // 位图必须仍在 memory DC 里，UpdateLayeredWindow 才能读到图内容。
-    const BOOL painted = UpdateLayeredWindow(window, screen, &destination, &size, memory, &source, 0, &blend, ULW_ALPHA);
+    const BOOL painted = UpdateLayeredWindow(window, nullptr, &destination, &size, memory, &source, 0, &blend, ULW_ALPHA);
+    const DWORD error = painted ? ERROR_SUCCESS : GetLastError();
     SelectObject(memory, previous);
     DeleteObject(bitmap);
     DeleteDC(memory);
-    ReleaseDC(nullptr, screen);
+    SetLastError(error);
     return painted != FALSE;
+}
+
+bool CandidateRenderer::renderPixels(void* bits, int width, int height, int dpi) {
+    // Both presenters need premultiplied alpha, which GDI+ won't write through an HDC.
+    Bitmap surface(width, height, width * 4, PixelFormat32bppPARGB, static_cast<BYTE*>(bits));
+    Graphics graphics(&surface);
+    if (surface.GetLastStatus() != Ok || graphics.GetLastStatus() != Ok) return false;
+    graphics.SetCompositingMode(CompositingModeSourceCopy);
+    graphics.Clear(Color(0, 0, 0, 0));
+    graphics.SetCompositingMode(CompositingModeSourceOver);
+    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+    graphics.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+    return xmjd::paintCandidateSurface(graphics, POINT{0, 0}, resolvedFace_, style_, items_, layout_,
+                                       selected_, dpi, hostDark_ ? *hostDark_ : xmjd::windowsCandidateDarkMode());
 }
 
 int CandidateRenderer::hitTest(POINT client) const {

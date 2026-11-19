@@ -54,12 +54,13 @@ bool writeFile(const std::filesystem::path& path, std::string_view value) {
     return ok;
 }
 
-std::optional<std::string> readSmallFile(const std::filesystem::path& path) {
+std::optional<std::string> readSmallFile(const std::filesystem::path& path, std::size_t maximum = 1024) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return std::nullopt;
     LARGE_INTEGER size{};
-    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > 1024) {
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 ||
+        static_cast<std::uint64_t>(size.QuadPart) > maximum) {
         CloseHandle(file);
         return std::nullopt;
     }
@@ -194,8 +195,49 @@ std::string takeCommit(RimeApi* api, RimeSessionId session) {
 }
 } // namespace
 
-RimeRuntime::RimeRuntime(std::filesystem::path executableDirectory)
-    : executableDirectory_(std::move(executableDirectory)) {}
+bool detail::writeSettingsSchemaFile(const std::filesystem::path& path, std::string_view schema) {
+    if (!validSchemaId(schema)) return false;
+    const auto existing = readSmallFile(path, 64 * 1024);
+    if (!existing && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
+
+    const std::string replacement = "schema=" + std::string(schema);
+    const std::string contents = existing.value_or(std::string{});
+    std::string updated;
+    updated.reserve(contents.size() + replacement.size() + 1);
+    bool wroteSchema = false;
+    std::size_t offset = 0;
+    while (offset < contents.size()) {
+        const auto end = contents.find('\n', offset);
+        const std::size_t lineEnd = end == std::string::npos ? contents.size() : end;
+        const std::string_view line(contents.data() + offset, lineEnd - offset);
+        const std::string trimmed = trimAscii(line);
+        const auto equals = trimmed.find('=');
+        if (equals != std::string::npos && trimAscii(std::string_view(trimmed).substr(0, equals)) == "schema") {
+            if (!wroteSchema) {
+                updated += replacement;
+                if (end != std::string::npos) updated.push_back('\n');
+                wroteSchema = true;
+            }
+        } else {
+            updated.append(line);
+            if (end != std::string::npos) updated.push_back('\n');
+        }
+        if (end == std::string::npos) break;
+        offset = end + 1;
+    }
+    if (!wroteSchema) {
+        if (!updated.empty() && updated.back() != '\n') updated.push_back('\n');
+        updated += replacement + "\n";
+    }
+
+    const auto temporary = path.wstring() + L".tmp";
+    if (!writeFile(temporary, updated)) return false;
+    return MoveFileExW(temporary.c_str(), path.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+}
+
+RimeRuntime::RimeRuntime(std::filesystem::path executableDirectory, std::filesystem::path dataDirectory)
+    : executableDirectory_(std::move(executableDirectory)), rootDirectory_(std::move(dataDirectory)) {}
 
 RimeRuntime::~RimeRuntime() {
     ready_ = false;
@@ -214,8 +256,7 @@ RimeRuntime::~RimeRuntime() {
 bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
     errorCode = 0;
     try {
-        rootDirectory_ = dataRoot();
-        if (rootDirectory_.empty()) {
+        if (!rootDirectory_.is_absolute()) {
             errorCode = kRuntimeErrorPaths;
             return false;
         }
@@ -546,7 +587,7 @@ std::filesystem::path RimeRuntime::settingsPath() const {
 }
 
 std::string RimeRuntime::readSettingsValue(std::string_view key) const {
-    const auto contents = readSmallFile(settingsPath());
+    const auto contents = readSmallFile(settingsPath(), 64 * 1024);
     if (!contents) return {};
     std::size_t offset = 0;
     while (offset < contents->size()) {
@@ -593,11 +634,7 @@ std::string RimeRuntime::readSettingsSchema() const {
 }
 
 bool RimeRuntime::writeSettingsSchema(const std::string& schema) {
-    if (!validSchemaId(schema)) return false;
-    const auto temporary = settingsPath().wstring() + L".tmp";
-    if (!writeFile(temporary, "schema=" + schema + "\n")) return false;
-    return MoveFileExW(temporary.c_str(), settingsPath().c_str(),
-                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    return detail::writeSettingsSchemaFile(settingsPath(), schema);
 }
 
 bool RimeRuntime::loadSelectedSchema() {
@@ -703,9 +740,18 @@ void RimeRuntime::destroySession(std::uint64_t session) {
 
 bool RimeRuntime::processKey(std::uint64_t session, std::uint32_t key, std::uint32_t modifiers) {
     auto* state = findSession(session);
-    if (!ready_ || !state || key > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
-        modifiers > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (!ready_ || !state || key > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) return false;
     if (!api_->find_session(state->id)) return false;
+    if ((modifiers & kShiftTapMask) != 0) {
+        constexpr std::uint32_t shift = 1u << 0;
+        constexpr std::uint32_t capsLock = 1u << 1;
+        if ((key != kLeftShiftKey && key != kRightShiftKey) || (modifiers & ~(kShiftTapMask | capsLock))) return false;
+        const auto lock = modifiers & capsLock;
+        // Preserve each scheme's Shift binding and commit behavior. Routing both
+        // edges together avoids timing a physical gesture across IPC callbacks.
+        (void)api_->process_key(state->id, static_cast<int>(key), static_cast<int>(lock | shift));
+        modifiers = lock | kReleaseMask;
+    }
     const bool handled = api_->process_key(state->id, static_cast<int>(key), static_cast<int>(modifiers)) != 0;
     return handled && api_->find_session(state->id);
 }

@@ -23,12 +23,6 @@ void require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
 }
 
-bool environmentEquals(const wchar_t* name, const wchar_t* expected) {
-    wchar_t value[64]{};
-    const DWORD length = GetEnvironmentVariableW(name, value, static_cast<DWORD>(std::size(value)));
-    return length > 0 && length < std::size(value) && std::wstring(value, length) == expected;
-}
-
 std::string describe(const Snapshot& snapshot) {
     std::string result = "raw=[" + snapshot.rawInput + "], preedit=[" + snapshot.preedit +
         "], commit=[" + snapshot.commitText + "], ascii=" + (snapshot.asciiMode ? "true" : "false") +
@@ -57,10 +51,70 @@ private:
     HANDLE handle_;
 };
 
+class TemporaryDirectory {
+public:
+    TemporaryDirectory() {
+        const auto base = std::filesystem::temp_directory_path();
+        for (unsigned attempt = 0; attempt != 8; ++attempt) {
+            path_ = base / (L"XMJD-RimeRuntimeTests-" + std::to_wstring(GetCurrentProcessId()) +
+                            L"-" + std::to_wstring(GetTickCount64()) + L"-" + std::to_wstring(attempt));
+            std::error_code ec;
+            if (std::filesystem::create_directory(path_, ec) && !ec) return;
+        }
+        throw std::runtime_error("无法创建隔离测试目录");
+    }
+    ~TemporaryDirectory() {
+        std::error_code ec;
+        std::filesystem::remove_all(path_, ec);
+    }
+    TemporaryDirectory(const TemporaryDirectory&) = delete;
+    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
+    const std::filesystem::path& path() const { return path_; }
+private:
+    std::filesystem::path path_;
+};
+
+void testSettingsSchemaWrite() {
+    TemporaryDirectory temporary;
+    const auto settings = temporary.path() / L"settings.ini";
+    {
+        std::ofstream stream(settings, std::ios::binary);
+        stream << "schema=xmjd6\n"
+               << "scheme_source=F:/JD6\n"
+               << "theme=dark\n";
+    }
+
+    require(xmjd::win::detail::writeSettingsSchemaFile(settings, "english"),
+            "保留其他设置时写入 schema 失败");
+    std::string contents;
+    {
+        std::ifstream updated(settings, std::ios::binary);
+        contents.assign(std::istreambuf_iterator<char>(updated), std::istreambuf_iterator<char>());
+    }
+    require(contents == "schema=english\nscheme_source=F:/JD6\ntheme=dark\n",
+            "写入 schema 覆盖或重复了其他设置：" + contents);
+
+    {
+        std::ofstream stream(settings, std::ios::binary | std::ios::trunc);
+        stream << "scheme_source=F:/JD6\n";
+    }
+    require(xmjd::win::detail::writeSettingsSchemaFile(settings, "xmjd6"),
+            "没有既有 schema 时追加设置失败");
+    std::string appendedContents;
+    {
+        std::ifstream appended(settings, std::ios::binary);
+        appendedContents.assign(std::istreambuf_iterator<char>(appended), std::istreambuf_iterator<char>());
+    }
+    require(appendedContents == "scheme_source=F:/JD6\nschema=xmjd6\n",
+            "追加 schema 未保留方案来源：" + appendedContents);
+    require(!xmjd::win::detail::writeSettingsSchemaFile(settings, "english/schema"),
+            "非法 schema 标识被接受");
+}
+
 void testRuntime(const std::filesystem::path& hostDirectory, const std::filesystem::path& root,
                  std::string& stage) {
     const DataLock lock(root);
-    RimeRuntime runtime(hostDirectory);
+    RimeRuntime runtime(hostDirectory, root);
     require(!runtime.ready(), "初始化前不应 ready");
     stage = "首次部署打包方案及加载真实 librime/Lua";
     std::cout << stage << std::endl;
@@ -169,6 +223,19 @@ void testRuntime(const std::filesystem::path& hostDirectory, const std::filesyst
     runtime.cancel(session);
     requireEmpty(runtime.snapshot(session));
 
+    stage = "左右 Shift 单击保留方案的 commit_code 语义";
+    require(!runtime.snapshot(session).asciiMode, "测试开始时应为中文模式");
+    compose('n', "你");
+    (void)runtime.processKey(session, xmjd::kLeftShiftKey, xmjd::kShiftTapMask);
+    const auto shifted = runtime.snapshot(session);
+    require(shifted.asciiMode && shifted.commitText == "n" && shifted.rawInput.empty(),
+            "左 Shift 未切到英文并提交原始编码；" + describe(shifted));
+    require(runtime.snapshot(session).commitText.empty(), "Shift 提交被重复读取");
+    (void)runtime.processKey(session, xmjd::kRightShiftKey, xmjd::kShiftTapMask);
+    require(!runtime.snapshot(session).asciiMode, "右 Shift 未切回中文");
+    (void)runtime.processKey(session, 'n', xmjd::kShiftTapMask);
+    requireEmpty(runtime.snapshot(session));
+
     stage = "销毁会话后拒绝旧会话及校验上屏总次数";
     runtime.destroySession(session);
     require(!runtime.processKey(session, 'n', 0), "已销毁会话仍可处理按键");
@@ -213,36 +280,30 @@ void testRuntime(const std::filesystem::path& hostDirectory, const std::filesyst
 int wmain(int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-    std::string stage = "校验 CI 和全新用户数据目录";
-    std::filesystem::path root;
+    if (argc == 2 && _wcsicmp(argv[1], L"--settings-schema") == 0) {
+        try {
+            testSettingsSchemaWrite();
+            std::cout << "RimeRuntimeTests 设置写入回归通过" << std::endl;
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << "RimeRuntimeTests 设置写入回归失败：" << error.what() << '\n';
+            return 1;
+        }
+    }
+    std::string stage = "校验构建资源并创建隔离测试目录";
     try {
         require(argc == 2, "用法：RimeRuntimeTests <XMJDHost 输出目录>");
-        // 不重定向已知目录。只有托管临时 runner 才允许写真实产品目录。
-        require(environmentEquals(L"GITHUB_ACTIONS", L"true") &&
-                    environmentEquals(L"RUNNER_ENVIRONMENT", L"github-hosted"),
-                "仅允许 GitHub 托管临时 runner 运行；需 GITHUB_ACTIONS=true 且 RUNNER_ENVIRONMENT=github-hosted");
         const std::filesystem::path hostDirectory(argv[1]);
         require(hostDirectory.is_absolute() && std::filesystem::is_directory(hostDirectory),
                 "Host 输出目录必须是存在的绝对路径");
         require(std::filesystem::is_regular_file(hostDirectory / L"rime.dll") &&
                     std::filesystem::is_regular_file(hostDirectory / L"Resources/Rime/xmjd6.schema.yaml"),
                 "Host 打包输出缺少 rime.dll 或方案资源，请先构建 XMJDHost");
-        root = xmjd::win::dataRoot();
-        require(!root.empty() && root.is_absolute(), "无法获取当前用户的 LocalAppData/XMJD");
-        std::cout << "测试数据目录：" << root.u8string() << "；结束后保留数据与日志，不自动删除" << std::endl;
-        std::error_code ec;
-        const auto status = std::filesystem::symlink_status(root, ec);
-        require(status.type() == std::filesystem::file_type::not_found &&
-                    (!ec || ec == std::errc::no_such_file_or_directory),
-                "拒绝使用已有或无法检查的 XMJD 目录；请使用全新临时 runner 用户，不会覆盖或删除数据");
-        ec.clear();
-        const bool created = std::filesystem::create_directory(root, ec);
-        require(created && !ec, "无法独占创建全新 XMJD 数据目录：" + ec.message());
-        testRuntime(hostDirectory, root, stage);
+        const TemporaryDirectory temporary;
+        testRuntime(hostDirectory, temporary.path(), stage);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "RimeRuntimeTests 失败，阶段=[" << stage << "]：" << error.what() << '\n';
-        if (!root.empty()) std::cerr << "数据与 librime 日志保留在：" << root.u8string() << '\n';
         return 1;
     }
 }

@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -14,9 +15,13 @@
 #include "rime_api.h"
 
 namespace xmjd::win {
+namespace detail {
+bool writeSettingsSchemaFile(const std::filesystem::path& path, std::string_view schema);
+}
+
 class RimeRuntime final : public Engine {
 public:
-    explicit RimeRuntime(std::filesystem::path executableDirectory);
+    RimeRuntime(std::filesystem::path executableDirectory, std::filesystem::path dataDirectory);
     ~RimeRuntime() override;
     RimeRuntime(const RimeRuntime&) = delete;
     RimeRuntime& operator=(const RimeRuntime&) = delete;

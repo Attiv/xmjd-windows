@@ -8,14 +8,15 @@
 
 namespace xmjd::tip {
 
-// 语言栏按钮：注册成 TSF 的 LangBar 项后，Windows 才把本输入法当作"正规 IME"对待，
-// 输入指示器也才有我们的位置。只做最小实现——一个图标 + 点击打开设置，
-// 菜单与中英图标后续再补，避免一次引入过多 COM 表面。
-class LangBarItem final : public ITfLangBarItemButton {
+// TSF 语言栏按钮：提供设置入口，并按引擎状态显示中/英模式图标。
+class LangBarItem final : public ITfLangBarItemButton, public ITfSource {
 public:
     LangBarItem(HINSTANCE instance, CLSID service, std::function<void()> clicked);
     const GUID& guid() const { return kItemGuid(); }
     static const GUID& kItemGuid();
+    HRESULT setAsciiMode(bool asciiMode);
+    HRESULT STDMETHODCALLTYPE AdviseSink(REFIID riid, IUnknown* sink, DWORD* cookie) override;
+    HRESULT STDMETHODCALLTYPE UnadviseSink(DWORD cookie) override;
 
     // IUnknown
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** object) override;
@@ -43,7 +44,16 @@ private:
     CLSID service_;
     std::function<void()> clicked_;
     bool shown_ = true;
-    HICON icon_ = nullptr;
+    bool asciiMode_ = false;
+    HRESULT notifyPending();
+    DWORD pendingFlags_ = 0;
+    bool notifying_ = false;
+    HICON chineseIcon_ = nullptr;
+    HICON englishIcon_ = nullptr;
+    HICON fallbackIcon_ = nullptr;
+    bool fallbackIconOwned_ = false;
+    ITfLangBarItemSink* sink_ = nullptr;
+    DWORD sinkCookie_ = 0;
 };
 
 } // namespace xmjd::tip

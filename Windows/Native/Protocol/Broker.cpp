@@ -75,7 +75,7 @@ Response BrokerConnection::dispatch(const Request& request) {
             Response response = resultFor(request, Status::Ok);
             response.id.sessionId = sessionId;
             response.handled = true;
-            response.snapshot.revision = 0;
+            response.snapshot.asciiMode = engine_.snapshot(engineId, false).asciiMode;
             return response;
         }
 

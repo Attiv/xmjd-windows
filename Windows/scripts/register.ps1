@@ -111,8 +111,8 @@ try {
     $baseKey.Dispose()
 }
 
-# 打包应用（系统搜索、设置、商店应用）是 AppContainer 进程，只能加载带
-# ALL APPLICATION PACKAGES 读权限的 DLL；Program Files 默认没有这一条。
+# 确保安装目录显式允许普通 AppContainer 读取和执行；父目录的默认 ACL
+# 会随系统配置变化。此权限不替代 DLL 注册的 IMMERSIVESUPPORT 兼容类别。
 & "$env:SystemRoot\System32\icacls.exe" $root '/grant' '*S-1-15-2-1:(OI)(CI)(RX)' '/T' '/Q' | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Warning 'Could not grant packaged-app read access; the IME will not work inside SearchHost or Store apps.'

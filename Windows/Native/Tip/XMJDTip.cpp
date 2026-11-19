@@ -26,6 +26,7 @@
 
 #include <cstring>
 #include "CandidateRenderer.h"
+#include "CandidatePopup.h"
 
 namespace xmjd::tip {
 namespace {
@@ -48,7 +49,14 @@ constexpr UINT_PTR kEngineRetryTimerId = 0x584d4a44;
 constexpr UINT kEngineRetryIntervalMs = 500;
 constexpr ULONGLONG kHostLaunchIntervalMs = 2000;
 constexpr wchar_t kPopupClassName[] = L"XMJD.TSF.CandidatePopup.v1";
-const GUID kTipCategories[] = {GUID_TFCAT_TIP_KEYBOARD, GUID_TFCAT_TIPCAP_UIELEMENTENABLED};
+// Windows apps filter out desktop-only TIPs before ActivateEx. A language-bar
+// button or DLL read permissions do not replace this compatibility declaration.
+// Keep registration and unregistration on the same list.
+const GUID kTipCategories[] = {
+    GUID_TFCAT_TIP_KEYBOARD,
+    GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+    GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+};
 // 候选窗右键菜单：输入法内部没有其它入口能打开设置，只能在候选窗上给出。
 constexpr UINT kMenuSettings = 1;
 constexpr UINT kMenuUserData = 2;
@@ -105,36 +113,38 @@ std::wstring modulePath() {
     return path;
 }
 
-// 候选窗失败的诊断日志：最多每秒一行，正常输入时几乎没有开销。
-std::string foregroundProcessName() {
-    static std::string cached;
-    static DWORD cachedThread = 0;
-    const DWORD thread = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
-    if (thread == cachedThread && !cached.empty()) return cached;
-    cachedThread = thread;
-    cached.clear();
-    const HWND focus = GetForegroundWindow();
-    if (!focus) return cached;
-    DWORD processId = 0;
-    GetWindowThreadProcessId(focus, &processId);
-    if (processId == 0) return cached;
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-    if (!process) return cached;
-    wchar_t path[1024]{};
-    DWORD size = static_cast<DWORD>(std::size(path));
-    if (QueryFullProcessImageNameW(process, 0, path, &size) && size > 0) {
-        const std::wstring full(path, size);
-        const auto slash = full.find_last_of(L"\\");
-        cached = xmjd::win::narrow(slash == std::wstring::npos ? full : full.substr(slash + 1));
-    }
-    CloseHandle(process);
-    return cached;
+// Report the process that actually loaded this DLL. The foreground window can
+// belong to a different process (especially with system input surfaces).
+const std::string& currentProcessName() {
+    static const std::string name = [] {
+        const auto executable = xmjd::win::modulePath();
+        return xmjd::win::narrow(executable.filename().wstring());
+    }();
+    return name;
 }
 
-// 不带限流的诊断行：只有"被谁加载了"这种一次性事件才用它。
-// 按键级诊断：只有 Logs\keys.debug 存在时才写，且只记录"是否处理/提交了几个字"，
-// 不记录具体按了什么键。用于回答"这个应用里按键到底发生了什么"。
-void logKeyOutcome(unsigned keycode, bool handled, std::size_t commit, std::size_t preedit, std::size_t input, bool ascii) {
+UINT shiftKeyCode(UINT virtualKey, LPARAM keyData) noexcept {
+    if (virtualKey == VK_LSHIFT) return kLeftShiftKey;
+    if (virtualKey == VK_RSHIFT) return kRightShiftKey;
+    if (virtualKey != VK_SHIFT) return 0;
+    return ((keyData >> 16) & 0xff) == 0x36 ? kRightShiftKey : kLeftShiftKey;
+}
+
+// Key diagnostics intentionally record categories and outcomes, never input values.
+void logKeyOutcome(unsigned keycode, bool handled, std::size_t commit, std::size_t preedit,
+                   std::size_t input, bool ascii, std::uint64_t ipcSequence, bool keyUp) {
+    const char* keyClass = keycode == kLeftShiftKey ? "left-shift" :
+        keycode == kRightShiftKey ? "right-shift" :
+        ((keycode >= 'a' && keycode <= 'z') || (keycode >= 'A' && keycode <= 'Z')) ? "letter" :
+        ((keycode >= '0' && keycode <= '9') ? "digit" : (keycode >= 0xffe1 ? "modifier" : "other"));
+    char debugLine[256]{};
+    std::snprintf(debugLine, sizeof(debugLine),
+                  "XMJD [%s pid=%lu] ipc=%llu edge=%s key=%s handled=%d commit=%zuB preedit=%zuB input=%zuB ascii=%d\n",
+                  currentProcessName().c_str(), GetCurrentProcessId(),
+                  static_cast<unsigned long long>(ipcSequence), keyUp ? "up" : "down", keyClass,
+                  handled ? 1 : 0, commit, preedit, input, ascii ? 1 : 0);
+    OutputDebugStringA(debugLine);
+
     const auto root = xmjd::win::dataRoot();
     if (root.empty()) return;
     const auto marker = root / L"Logs" / L"keys.debug";
@@ -144,16 +154,38 @@ void logKeyOutcome(unsigned keycode, bool handled, std::size_t commit, std::size
     if (!stream) return;
     SYSTEMTIME time{};
     GetLocalTime(&time);
-    const char* cls = (keycode >= 'a' && keycode <= 'z') || (keycode >= 'A' && keycode <= 'Z')
-        ? "letter"
-        : ((keycode >= '0' && keycode <= '9') ? "digit" : (keycode >= 0xffe1 ? "modifier" : "other"));
-    char line[200]{};
-    // commit/preedit 记的是 UTF-8 字节数，汉字一字 3 字节，读日志时按此换算。
-    std::snprintf(line, sizeof(line), "%02u:%02u:%02u [%s] %s handled=%d commit=%zuB preedit=%zuB input=%zuB ascii=%d\n",
+    char line[240]{};
+    std::snprintf(line, sizeof(line),
+                  "%02u:%02u:%02u [%s] ipc=%llu edge=%s key=%s handled=%d commit=%zuB preedit=%zuB input=%zuB ascii=%d\n",
                   static_cast<unsigned>(time.wHour), static_cast<unsigned>(time.wMinute),
-                  static_cast<unsigned>(time.wSecond),
-                  foregroundProcessName().c_str(), cls, handled ? 1 : 0, commit, preedit, input, ascii ? 1 : 0);
+                  static_cast<unsigned>(time.wSecond), currentProcessName().c_str(),
+                  static_cast<unsigned long long>(ipcSequence), keyUp ? "up" : "down", keyClass,
+                  handled ? 1 : 0, commit, preedit, input, ascii ? 1 : 0);
     stream << line;
+}
+
+const char* callbackKeyClass(UINT key, LPARAM keyData) noexcept {
+    const UINT shift = shiftKeyCode(key, keyData);
+    if (shift == kLeftShiftKey) return "left-shift";
+    if (shift == kRightShiftKey) return "right-shift";
+    if ((key >= 'A' && key <= 'Z') || (key >= 'a' && key <= 'z')) return "letter";
+    if (key >= '0' && key <= '9') return "digit";
+    if (key == VK_CONTROL || key == VK_LCONTROL || key == VK_RCONTROL ||
+        key == VK_MENU || key == VK_LMENU || key == VK_RMENU || key == VK_LWIN || key == VK_RWIN) return "modifier";
+    return "other";
+}
+
+void logKeyCallback(const char* callback, UINT key, LPARAM keyData, ITfContext* context,
+                    BOOL* eaten, HRESULT result) noexcept {
+    static std::atomic<std::uint64_t> sequence{0};
+    char line[256]{};
+    std::snprintf(line, sizeof(line),
+                  "XMJD [%s pid=%lu tid=%lu] callback=%llu name=%s key=%s context=%u eaten=%d hr=0x%08lX\n",
+                  currentProcessName().c_str(), GetCurrentProcessId(), GetCurrentThreadId(),
+                  static_cast<unsigned long long>(sequence.fetch_add(1, std::memory_order_relaxed) + 1),
+                  callback, callbackKeyClass(key, keyData), context ? 1u : 0u,
+                  eaten ? (*eaten ? 1 : 0) : -1, static_cast<unsigned long>(result));
+    OutputDebugStringA(line);
 }
 
 // 语言栏按钮点击后打开设置程序。DLL 位于 <安装目录>\Tip\x64\ 下。
@@ -169,6 +201,12 @@ void openSettingsFromTip() {
 }
 
 void logTipEvent(const char* stage) {
+    // Debug output still works when the application's sandbox prevents writing
+    // our normal product log. Failure to write that log is not proof of no load.
+    char debugLine[512]{};
+    std::snprintf(debugLine, sizeof(debugLine), "XMJD [%s pid=%lu tid=%lu] %s\n",
+                  currentProcessName().c_str(), GetCurrentProcessId(), GetCurrentThreadId(), stage);
+    OutputDebugStringA(debugLine);
     const auto root = xmjd::win::dataRoot();
     if (root.empty()) return;
     const auto directory = root / L"Logs";
@@ -179,7 +217,7 @@ void logTipEvent(const char* stage) {
     if (!stream) return;
     SYSTEMTIME time{};
     GetLocalTime(&time);
-    const std::string host = foregroundProcessName();
+    const std::string host = currentProcessName();
     char stamp[80]{};
     std::snprintf(stamp, sizeof(stamp), "%04u-%02u-%02u %02u:%02u:%02u [%s] ",
                   static_cast<unsigned>(time.wYear), static_cast<unsigned>(time.wMonth),
@@ -189,42 +227,86 @@ void logTipEvent(const char* stage) {
     stream << stamp << stage << '\n';
 }
 
-void logCandidateStage(const char* stage) {
+void logActivationResult(const char* stage, HRESULT result, DWORD flags) {
+    char line[160]{};
+    std::snprintf(line, sizeof(line), "%s hr=0x%08lX flags=0x%08lX", stage,
+                  static_cast<unsigned long>(result), static_cast<unsigned long>(flags));
+    logTipEvent(line);
+}
+
+void logFocusState(const char* stage, HRESULT result, bool hasDocument, bool hasContext,
+                   bool foreground, bool hasSession, std::uint64_t epoch) noexcept {
+    char line[320]{};
+    std::snprintf(line, sizeof(line),
+                  "XMJD [%s pid=%lu tid=%lu] %s hr=0x%08lX document=%u context=%u foreground=%u session=%u epoch=%llu\n",
+                  currentProcessName().c_str(), GetCurrentProcessId(), GetCurrentThreadId(), stage,
+                  static_cast<unsigned long>(result), hasDocument ? 1u : 0u,
+                  hasContext ? 1u : 0u, foreground ? 1u : 0u, hasSession ? 1u : 0u,
+                  static_cast<unsigned long long>(epoch));
+    OutputDebugStringA(line);
+}
+
+void logModeNotification(const char* stage, bool asciiMode, HRESULT result) noexcept {
+    char line[256]{};
+    std::snprintf(line, sizeof(line), "XMJD [%s pid=%lu tid=%lu] %s mode=%s notify-hr=0x%08lX\n",
+                  currentProcessName().c_str(), GetCurrentProcessId(), GetCurrentThreadId(), stage,
+                  asciiMode ? "english" : "chinese", static_cast<unsigned long>(result));
+    OutputDebugStringA(line);
+}
+
+void logCandidateStage(const char* stage, DWORD detail = ERROR_SUCCESS) {
     static std::atomic<ULONGLONG> lastWrite{0};
     const ULONGLONG now = GetTickCount64();
     ULONGLONG previous = lastWrite.load();
     if (now - previous < 1000) return;
     if (!lastWrite.compare_exchange_strong(previous, now)) return;
-    const auto root = xmjd::win::dataRoot();
-    if (root.empty()) return;
-    const auto directory = root / L"Logs";
-    std::error_code ec;
-    std::filesystem::create_directories(directory, ec);
-    if (ec) return;
-    std::ofstream stream(directory / L"tip.log", std::ios::app | std::ios::binary);
-    if (!stream) return;
-    SYSTEMTIME time{};
-    GetLocalTime(&time);
-    char stamp[64]{};
-    std::snprintf(stamp, sizeof(stamp), "%04u-%02u-%02u %02u:%02u:%02u ",
-                  static_cast<unsigned>(time.wYear), static_cast<unsigned>(time.wMonth),
-                  static_cast<unsigned>(time.wDay), static_cast<unsigned>(time.wHour),
-                  static_cast<unsigned>(time.wMinute), static_cast<unsigned>(time.wSecond));
-    // 带上宿主进程名："某个应用里不工作"这类问题不用再靠猜。
-    const std::string host = foregroundProcessName();
-    stream << stamp << '[' << (host.empty() ? "?" : host.c_str()) << "] " << stage << '\n';
+    char event[160]{};
+    std::snprintf(event, sizeof(event), "%s detail=0x%08lX", stage, static_cast<unsigned long>(detail));
+    logTipEvent(event);
+}
+
+void logTipWin32Failure(const char* stage, unsigned long error) {
+    char line[160]{};
+    std::snprintf(line, sizeof(line), "%s win32=%lu", stage, error);
+    logTipEvent(line);
+}
+
+void logTipHresultFailure(const char* stage, HRESULT result) {
+    char line[160]{};
+    std::snprintf(line, sizeof(line), "%s hr=0x%08lX", stage,
+                  static_cast<unsigned long>(result));
+    logTipEvent(line);
 }
 
 bool readHostExecutable(std::wstring& executable) {
     executable.clear();
+    const std::wstring tipModule = modulePath();
+    if (!tipModule.empty()) {
+        std::filesystem::path install(std::filesystem::path(tipModule).parent_path());
+        for (int level = 0; level < 2 && !install.empty(); ++level) install = install.parent_path();
+        if (!install.empty()) {
+            const auto candidate = install / L"XMJDHost.exe";
+            std::error_code ec;
+            if (candidate.is_absolute() && std::filesystem::is_regular_file(candidate, ec) && !ec) {
+                executable = candidate.wstring();
+                return true;
+            }
+        }
+    }
     HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kInstallMetadataKey, 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS) return false;
+    const LONG openResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, kInstallMetadataKey, 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key);
+    if (openResult != ERROR_SUCCESS) {
+        logTipWin32Failure("host-path registry-open-failed", static_cast<unsigned long>(openResult));
+        return false;
+    }
     DWORD type = 0;
     DWORD bytes = 0;
     LONG query = RegQueryValueExW(key, kHostExecutableValue, nullptr, &type, nullptr, &bytes);
     if (query != ERROR_SUCCESS || type != REG_SZ || bytes < 2 * sizeof(wchar_t) ||
         bytes > 32768 * sizeof(wchar_t) || bytes % sizeof(wchar_t) != 0) {
         RegCloseKey(key);
+        logTipWin32Failure("host-path registry-value-invalid",
+                           query == ERROR_SUCCESS ? ERROR_INVALID_DATA : static_cast<unsigned long>(query));
         return false;
     }
     executable.assign(bytes / sizeof(wchar_t), L'\0');
@@ -232,7 +314,11 @@ bool readHostExecutable(std::wstring& executable) {
                              reinterpret_cast<BYTE*>(executable.data()), &bytes);
     RegCloseKey(key);
     if (query != ERROR_SUCCESS || type != REG_SZ || bytes < 2 * sizeof(wchar_t) ||
-        bytes % sizeof(wchar_t) != 0) return false;
+        bytes % sizeof(wchar_t) != 0) {
+        logTipWin32Failure("host-path registry-read-failed",
+                           query == ERROR_SUCCESS ? ERROR_INVALID_DATA : static_cast<unsigned long>(query));
+        return false;
+    }
     executable.resize(bytes / sizeof(wchar_t));
     if (executable.empty() || executable.back() != L'\0') return false;
     executable.pop_back();
@@ -430,37 +516,52 @@ HRESULT STDMETHODCALLTYPE XMJDTip::Activate(ITfThreadMgr* manager, TfClientId cl
     return ActivateEx(manager, clientId, 0);
 }
 HRESULT STDMETHODCALLTYPE XMJDTip::ActivateEx(ITfThreadMgr* manager, TfClientId clientId, DWORD flags) {
-    if (!manager) return E_INVALIDARG;
-    if (activated_) return TF_E_ALREADY_EXISTS;
-    logTipEvent("activate");
+    if (!manager) {
+        logActivationResult("activate-invalid-manager", E_INVALIDARG, flags);
+        return E_INVALIDARG;
+    }
+    if (activated_) {
+        logActivationResult("activate-already-active", TF_E_ALREADY_EXISTS, flags);
+        return TF_E_ALREADY_EXISTS;
+    }
+    logActivationResult("activate-enter", S_OK, flags);
+    const auto failActivation = [this, flags](const char* stage, HRESULT result) {
+        logActivationResult(stage, result, flags);
+        deactivate();
+        return result;
+    };
     try {
         threadManager_ = manager;
         threadManager_->AddRef();
         clientId_ = clientId;
         activationFlags_ = flags;
+        candidateCompositionFailed_ = false;
+        allowCandidateAppearance_ = true;
         // 是否由应用自绘候选只能看 BeginUIElement 的 show 返回值；
         // TF_TMF_UIELEMENTENABLEDONLY 只说明线程处于 UILess 模式，
         // 应用仍可能允许输入法自己画候选窗，不能据此关掉候选。
         HRESULT hr = threadManager_->QueryInterface(IID_PPV_ARGS(&keystrokeManager_));
-        if (FAILED(hr)) { deactivate(); return hr; }
+        if (FAILED(hr)) return failActivation("activate-fail query-keystroke", hr);
         hr = threadManager_->QueryInterface(IID_PPV_ARGS(&uiElementManager_));
-        if (FAILED(hr)) { deactivate(); return hr; }
+        if (FAILED(hr)) return failActivation("activate-fail query-ui-element", hr);
         hr = threadManager_->QueryInterface(IID_PPV_ARGS(&threadSource_));
-        if (FAILED(hr)) { deactivate(); return hr; }
+        if (FAILED(hr)) return failActivation("activate-fail query-source", hr);
         hr = keystrokeManager_->AdviseKeyEventSink(clientId_, this, TRUE);
-        if (FAILED(hr)) { deactivate(); return hr; }
+        if (FAILED(hr)) return failActivation("activate-fail key-sink", hr);
         keySinkAdvised_ = true;
         logTipEvent("activate-key-sink-ok");
         logTipEvent("activate-query-ok");
         hr = threadSource_->AdviseSink(IID_ITfThreadMgrEventSink,
                                        static_cast<ITfThreadMgrEventSink*>(this), &threadSinkCookie_);
-        if (FAILED(hr)) { logTipEvent("activate-fail thread-sink"); deactivate(); return hr; }
+        if (FAILED(hr)) return failActivation("activate-fail thread-sink", hr);
         hr = threadSource_->AdviseSink(IID_ITfInputProcessorProfileActivationSink,
                                        static_cast<ITfInputProcessorProfileActivationSink*>(this), &profileSinkCookie_);
-        if (FAILED(hr)) { deactivate(); return hr; }
+        if (FAILED(hr)) return failActivation("activate-fail profile-sink", hr);
         activated_ = true;
         foreground_ = true;
-        createCandidateWindow();
+        // Register the class on activation, but create the candidate popup only
+        // when an actual TSF view provides its owner.
+        (void)ensurePopupClass();
         ITfContext* focusedContext = nullptr;
         ITfDocumentMgr* focusedDocument = nullptr;
         if (SUCCEEDED(getFocusedContext(&focusedContext, &focusedDocument))) {
@@ -470,11 +571,10 @@ HRESULT STDMETHODCALLTYPE XMJDTip::ActivateEx(ITfThreadMgr* manager, TfClientId 
             if (contextReady) scheduleEngineRetry();
         }
         createLangBarItem();
-        logTipEvent("activate-ok");
+        logActivationResult("activate-ok", S_OK, flags);
         return S_OK;
     } catch (...) {
-        deactivate();
-        return E_UNEXPECTED;
+        return failActivation("activate-fail exception", E_UNEXPECTED);
     }
 }
 HRESULT STDMETHODCALLTYPE XMJDTip::Deactivate() {
@@ -491,15 +591,18 @@ void XMJDTip::createLangBarItem() {
         manager->Release();
         return;
     }
-    if (FAILED(manager->AddItem(item))) {
+    const HRESULT added = manager->AddItem(item);
+    if (FAILED(added)) {
         // 加不上不算致命：输入法本身照常工作，只是没有语言栏按钮。
         item->Release();
         manager->Release();
-        logTipEvent("langbar-add-failed");
+        logActivationResult("langbar-add-failed", added, activationFlags_);
         return;
     }
     langBarManager_ = manager;
     langBarItem_ = item;
+    const HRESULT modeRefresh = item->setAsciiMode(asciiMode_);
+    logModeNotification("langbar-initial-mode-notify", asciiMode_, modeRefresh);
     logTipEvent("langbar-added");
 }
 
@@ -530,8 +633,8 @@ void XMJDTip::deactivate() noexcept {
         threadSource_->UnadviseSink(threadSinkCookie_);
         threadSinkCookie_ = TF_INVALID_COOKIE;
     }
-    if (candidateWindow_) {
-        const HWND window = std::exchange(candidateWindow_, nullptr);
+    destroyCandidateWindow();
+    if (const HWND window = std::exchange(engineRetryWindow_, nullptr)) {
         SetWindowLongPtrW(window, GWLP_USERDATA, 0);
         DestroyWindow(window);
     }
@@ -594,7 +697,12 @@ bool XMJDTip::ensureContext(ITfContext* context) {
     if (!context || resettingContext_) return false;
     IUnknown* incoming = nullptr;
     IUnknown* current = nullptr;
-    if (FAILED(context->QueryInterface(IID_PPV_ARGS(&incoming)))) return false;
+    const HRESULT identityResult = context->QueryInterface(IID_PPV_ARGS(&incoming));
+    if (FAILED(identityResult)) {
+        logFocusState("context-identity-failed", identityResult, documentManager_ != nullptr, false,
+                      foreground_, hasEngineSession_, contextEpoch_);
+        return false;
+    }
     bool same = false;
     if (context_ && SUCCEEDED(context_->QueryInterface(IID_PPV_ARGS(&current)))) same = current == incoming;
     releaseInterface(incoming);
@@ -604,12 +712,21 @@ bool XMJDTip::ensureContext(ITfContext* context) {
     // reset 可能释放与传入参数相同的上下文，先保留调用方的目标。
     ComPtr<ITfContext> incomingContext = context;
     resetForFocusChange();
-    if (!activated_ || !isCurrentContext(incomingContext.Get())) return false;
+    if (!activated_ || !isCurrentContext(incomingContext.Get())) {
+        logFocusState("context-adopt-rejected", TF_E_DISCONNECTED, false, true,
+                      foreground_, hasEngineSession_, contextEpoch_);
+        return false;
+    }
     ComPtr<ITfDocumentMgr> incomingDocument;
-    if (FAILED(incomingContext->GetDocumentMgr(incomingDocument.GetAddressOf())) || !incomingDocument ||
-        !activated_ || !isCurrentContext(incomingContext.Get())) return false;
+    const HRESULT documentResult = incomingContext->GetDocumentMgr(incomingDocument.GetAddressOf());
+    if (FAILED(documentResult) || !incomingDocument || !activated_ || !isCurrentContext(incomingContext.Get())) {
+        logFocusState("context-document-unavailable", FAILED(documentResult) ? documentResult : TF_E_DISCONNECTED,
+                      incomingDocument.Get() != nullptr, true, foreground_, hasEngineSession_, contextEpoch_);
+        return false;
+    }
     context_ = incomingContext.Detach();
     documentManager_ = incomingDocument.Detach();
+    logFocusState("context-adopted", S_OK, true, true, foreground_, hasEngineSession_, contextEpoch_);
     scheduleEngineRetry();
     return true;
 }
@@ -629,13 +746,32 @@ bool XMJDTip::transact(Operation operation, Request& request, Response& response
     request.operation = operation;
     try {
         const auto result = pipe_.transact(request, kInputDeadlineMs);
-        if (!result || result->id.contextEpoch != request.id.contextEpoch ||
-            result->id.connectionEpoch != request.id.connectionEpoch || result->id.sequence != request.id.sequence) return false;
-        if (operation != Operation::CreateSession && result->id.sessionId != request.id.sessionId) return false;
+        if (!result) {
+            logTipEvent(operation == Operation::CreateSession ? "engine-session response-missing" : "process-key response-missing");
+            return false;
+        }
+        if (result->id.contextEpoch != request.id.contextEpoch ||
+            result->id.connectionEpoch != request.id.connectionEpoch || result->id.sequence != request.id.sequence) {
+            logTipEvent(operation == Operation::CreateSession ? "engine-session response-stale" : "process-key response-stale");
+            return false;
+        }
+        if (operation != Operation::CreateSession && result->id.sessionId != request.id.sessionId) {
+            logTipEvent("process-key response-session-mismatch");
+            return false;
+        }
         response = *result;
-        if (operation == Operation::CreateSession && response.status == Status::Ok && response.handled) {
-            sessionId_ = response.id.sessionId;
-            hasEngineSession_ = sessionId_ != 0;
+        if (operation == Operation::CreateSession) {
+            char diagnostic[256]{};
+            std::snprintf(diagnostic, sizeof(diagnostic),
+                          "engine-session-response seq=%llu status=%s handled=%u session=%u",
+                          static_cast<unsigned long long>(request.id.sequence),
+                          xmjd::statusName(response.status), response.handled ? 1u : 0u,
+                          response.id.sessionId != 0 ? 1u : 0u);
+            logTipEvent(diagnostic);
+            if (response.status == Status::Ok && response.handled) {
+                sessionId_ = response.id.sessionId;
+                hasEngineSession_ = sessionId_ != 0;
+            }
         }
         return true;
     } catch (...) {
@@ -649,20 +785,42 @@ bool XMJDTip::createEngineSession() {
         contextUnavailable_ || composition_ || !isCurrentContext(context_)) return false;
     if (!pipe_.connected()) {
         std::wstring executable;
-        if (!readHostExecutable(executable)) return false;
+        if (!readHostExecutable(executable)) {
+            logTipEvent("engine-connect host-path-unavailable");
+            return false;
+        }
         const std::filesystem::path hostPath(executable);
         std::error_code error;
-        if (!hostPath.is_absolute() || !std::filesystem::is_regular_file(hostPath, error)) return false;
+        if (!hostPath.is_absolute() || !std::filesystem::is_regular_file(hostPath, error)) {
+            logTipEvent("engine-connect host-file-unavailable");
+            return false;
+        }
         if (!pipe_.connect(hostPath)) {
+            char stage[128]{};
+            std::snprintf(stage, sizeof(stage), "engine-connect %s",
+                          pipe_.connectFailureStage() ? pipe_.connectFailureStage() : "unknown");
+            logTipWin32Failure(stage, pipe_.connectFailureCode());
             // Never inherit an elevated or restricted application's token.
             HANDLE token = nullptr;
-            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+                logTipWin32Failure("engine-connect token-open-failed", GetLastError());
+                return false;
+            }
             TOKEN_ELEVATION elevation{};
             DWORD returned = 0;
-            const bool ordinary = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &returned) &&
-                                  !elevation.TokenIsElevated && !IsTokenRestricted(token);
+            const BOOL elevationRead = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &returned);
+            DWORD appContainer = 0;
+            const BOOL containerRead = GetTokenInformation(token, TokenIsAppContainer, &appContainer,
+                                                           sizeof(appContainer), &returned);
+            const bool ordinary = elevationRead && containerRead && !elevation.TokenIsElevated &&
+                                  !appContainer && !IsTokenRestricted(token);
+            const DWORD tokenError = ordinary ? ERROR_SUCCESS :
+                (elevationRead && containerRead ? ERROR_ACCESS_DENIED : GetLastError());
             CloseHandle(token);
-            if (!ordinary) return false;
+            if (!ordinary) {
+                logTipWin32Failure("engine-connect launch-token-rejected", tokenError);
+                return false;
+            }
             const ULONGLONG now = GetTickCount64();
             ULONGLONG previous = g_lastHostLaunch.load();
             if (previous != 0 && now - previous < kHostLaunchIntervalMs) return false;
@@ -676,16 +834,50 @@ bool XMJDTip::createEngineSession() {
                                CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup, &process)) {
                 CloseHandle(process.hThread);
                 CloseHandle(process.hProcess);
+                logTipEvent("engine-connect host-launched");
+            } else {
+                logTipWin32Failure("engine-connect host-launch-failed", GetLastError());
             }
             return false;
         }
     }
     Request request;
+    request.wantsAppearance = allowCandidateAppearance_ && (activationFlags_ & TF_TMF_IMMERSIVEMODE) != 0;
     Response response;
-    if (!transact(Operation::CreateSession, request, response) || response.status != Status::Ok || !response.handled) {
+    if (!transact(Operation::CreateSession, request, response)) {
+        logTipEvent("engine-session transact-failed");
+        pipe_.close();
+        if (request.wantsAppearance) {
+            // Older Hosts reject the extra field. Reconnect with the plain request once.
+            allowCandidateAppearance_ = false;
+            if (createEngineSession()) return true;
+            allowCandidateAppearance_ = true;
+        }
+        return false;
+    }
+    if (response.status != Status::Ok || !response.handled) {
+        char stage[128]{};
+        std::snprintf(stage, sizeof(stage), "engine-session rejected status=%u handled=%u",
+                      static_cast<unsigned>(response.status), response.handled ? 1u : 0u);
+        logTipEvent(stage);
         pipe_.close();
         return false;
     }
+    if (response.appearance) {
+        try {
+            xmjd::CandidateStyle style;
+            std::string error;
+            if (xmjd::parseCandidateStyle(response.appearance->json, style, error)) {
+                if (!candidateRenderer_) candidateRenderer_ = std::make_unique<CandidateRenderer>();
+                candidateRenderer_->setAppearance(std::move(style), response.appearance->dark);
+                logTipEvent("candidate-appearance applied");
+            }
+        } catch (...) {
+            // Candidate appearance is optional and must never disable typing.
+        }
+    }
+    reportImeMode(response.snapshot.asciiMode);
+    logTipEvent("engine-session created");
     return hasEngineSession_;
 }
 
@@ -733,13 +925,20 @@ void XMJDTip::retryEngineSession() {
 
 void XMJDTip::scheduleEngineRetry() {
     if (!activated_ || !foreground_ || !context_ || engineRetryScheduled_) return;
-    if (createCandidateWindow()) {
-        engineRetryScheduled_ = SetTimer(candidateWindow_, kEngineRetryTimerId, kEngineRetryIntervalMs, nullptr) != 0;
+    if (!engineRetryWindow_ && ensurePopupClass()) {
+        engineRetryWindow_ = CreateWindowExW(0, kPopupClassName, L"", 0,
+                                              0, 0, 0, 0, HWND_MESSAGE, nullptr, g_module, this);
+        // Keep the pre-existing hidden-window retry route in hosts that
+        // disallow message-only windows. This HWND never displays candidates.
+        if (!engineRetryWindow_) engineRetryWindow_ = createCandidatePopup(kPopupClassName, g_module, nullptr, this);
+    }
+    if (engineRetryWindow_) {
+        engineRetryScheduled_ = SetTimer(engineRetryWindow_, kEngineRetryTimerId, kEngineRetryIntervalMs, nullptr) != 0;
     }
 }
 
 void XMJDTip::cancelEngineRetry() noexcept {
-    if (candidateWindow_) KillTimer(candidateWindow_, kEngineRetryTimerId);
+    if (engineRetryWindow_) KillTimer(engineRetryWindow_, kEngineRetryTimerId);
     engineRetryScheduled_ = false;
 }
 
@@ -750,10 +949,14 @@ bool XMJDTip::startComposition(EditSession* edit, TfEditCookie cookie) {
     TF_SELECTION selection{};
     ULONG fetched = 0;
     HRESULT hr = target->GetSelection(cookie, TF_DEFAULT_SELECTION, 1, &selection, &fetched);
-    if (FAILED(hr) || fetched != 1 || !selection.range) return false;
+    if (FAILED(hr) || fetched != 1 || !selection.range) {
+        logTipHresultFailure("composition-start selection-failed", FAILED(hr) ? hr : E_FAIL);
+        return false;
+    }
     ITfContextComposition* contextComposition = nullptr;
     hr = target->QueryInterface(IID_PPV_ARGS(&contextComposition));
     if (FAILED(hr) || !contextComposition || !isValidEdit(edit)) {
+        if (FAILED(hr)) logTipHresultFailure("composition-start context-interface-failed", hr);
         releaseInterface(contextComposition);
         selection.range->Release();
         return false;
@@ -762,7 +965,10 @@ bool XMJDTip::startComposition(EditSession* edit, TfEditCookie cookie) {
     hr = contextComposition->StartComposition(cookie, selection.range, this, &started);
     contextComposition->Release();
     selection.range->Release();
-    if (FAILED(hr) || !started) return false;
+    if (FAILED(hr) || !started) {
+        logTipHresultFailure("composition-start tsf-failed", FAILED(hr) ? hr : E_FAIL);
+        return false;
+    }
     if (!isValidEdit(edit)) {
         started->EndComposition(cookie);
         started->Release();
@@ -777,20 +983,40 @@ bool XMJDTip::startComposition(EditSession* edit, TfEditCookie cookie) {
 }
 
 bool XMJDTip::setCompositionText(EditSession* edit, TfEditCookie cookie, std::wstring_view text, UINT caret) {
-    if (!isValidEdit(edit) || (!composition_ && !startComposition(edit, cookie))) return false;
+    if (!isValidEdit(edit)) return false;
+    if (!composition_ && !startComposition(edit, cookie)) return false;
     ComPtr<ITfContext> target = edit->context_;
     ComPtr<ITfComposition> active = composition_;
     ITfRange* range = nullptr;
-    if (FAILED(active->GetRange(&range)) || !range) return false;
+    HRESULT hr = active->GetRange(&range);
+    if (FAILED(hr) || !range) {
+        logTipHresultFailure("composition-update get-range-failed", FAILED(hr) ? hr : E_FAIL);
+        return false;
+    }
     const HRESULT textResult = isValidEdit(edit)
         ? range->SetText(cookie, 0, text.empty() ? L"" : text.data(), static_cast<LONG>(text.size())) : TF_E_DISCONNECTED;
     range->Release();
-    if (FAILED(textResult) || !isValidEdit(edit) || active.Get() != composition_ ||
-        FAILED(active->GetRange(&range)) || !range) return false;
+    if (FAILED(textResult)) {
+        logTipHresultFailure("composition-update set-text-failed", textResult);
+        return false;
+    }
+    char diagnostic[96]{};
+    std::snprintf(diagnostic, sizeof(diagnostic), "XMJD [%s pid=%lu] composition-update-ok units=%zu\n",
+                  currentProcessName().c_str(), GetCurrentProcessId(), text.size());
+    OutputDebugStringA(diagnostic);
+    if (!isValidEdit(edit) || active.Get() != composition_) return false;
+    hr = active->GetRange(&range);
+    if (FAILED(hr) || !range) {
+        logTipHresultFailure("composition-update refresh-range-failed", FAILED(hr) ? hr : E_FAIL);
+        return false;
+    }
     ITfRange* caretRange = nullptr;
-    HRESULT hr = range->Clone(&caretRange);
+    hr = range->Clone(&caretRange);
     range->Release();
-    if (FAILED(hr) || !caretRange) return false;
+    if (FAILED(hr) || !caretRange) {
+        logTipHresultFailure("composition-update clone-range-failed", FAILED(hr) ? hr : E_FAIL);
+        return false;
+    }
     hr = caretRange->Collapse(cookie, TF_ANCHOR_START);
     LONG shifted = 0;
     const LONG boundedCaret = static_cast<LONG>(std::min<std::size_t>(caret, text.size()));
@@ -805,6 +1031,7 @@ bool XMJDTip::setCompositionText(EditSession* edit, TfEditCookie cookie, std::ws
         hr = isValidEdit(edit) ? target->SetSelection(cookie, 1, &selection) : TF_E_DISCONNECTED;
     }
     caretRange->Release();
+    if (FAILED(hr)) logTipHresultFailure("composition-update caret-failed", hr);
     return SUCCEEDED(hr);
 }
 
@@ -820,21 +1047,42 @@ bool XMJDTip::commitText(EditSession* edit, TfEditCookie cookie, std::wstring_vi
         // 先把组合串就地清掉再按普通文本插入。Chromium 系应用（Electron/Chrome）
         // 对"改写组合串内容后立刻结束组合"处理不稳，会把要提交的字丢掉——
         // 顶功时"提交 + 开新组合"正好是那个形状，所以只在那类应用里吞字。
-        if (!endComposition(edit, cookie, true)) return false;
-        if (!isValidEdit(edit)) return false;
+        if (!endComposition(edit, cookie, true)) {
+            logTipEvent("insert-fail composition-end");
+            return false;
+        }
+        if (!isValidEdit(edit)) {
+            logTipEvent("insert-fail edit-invalid-after-composition");
+            return false;
+        }
     }
     ComPtr<ITfInsertAtSelection> insertion;
     HRESULT hr = target->QueryInterface(IID_PPV_ARGS(insertion.GetAddressOf()));
-    if (FAILED(hr) || !isValidEdit(edit)) return false;
+    if (FAILED(hr)) {
+        logTipHresultFailure("insert-fail query-interface", hr);
+        return false;
+    }
+    if (!isValidEdit(edit)) return false;
     ComPtr<ITfRange> inserted;
     hr = insertion->InsertTextAtSelection(cookie, 0, value, static_cast<LONG>(text.size()), inserted.GetAddressOf());
-    if (FAILED(hr) || !inserted) return false;
+    if (FAILED(hr) || !inserted) {
+        logTipHresultFailure("insert-fail tsf-insert", FAILED(hr) ? hr : E_FAIL);
+        return false;
+    }
+    char diagnostic[96]{};
+    std::snprintf(diagnostic, sizeof(diagnostic), "XMJD [%s pid=%lu] insert-ok units=%zu\n",
+                  currentProcessName().c_str(), GetCurrentProcessId(), text.size());
+    OutputDebugStringA(diagnostic);
     // 插入已经成功，光标调整失败不得触发重放。
-    if (isValidEdit(edit) && SUCCEEDED(inserted->Collapse(cookie, TF_ANCHOR_END)) && isValidEdit(edit)) {
-        TF_SELECTION selection{};
-        selection.range = inserted.Get();
-        selection.style.ase = TF_AE_NONE;
-        target->SetSelection(cookie, 1, &selection);
+    if (isValidEdit(edit)) {
+        hr = inserted->Collapse(cookie, TF_ANCHOR_END);
+        if (SUCCEEDED(hr) && isValidEdit(edit)) {
+            TF_SELECTION selection{};
+            selection.range = inserted.Get();
+            selection.style.ase = TF_AE_NONE;
+            hr = target->SetSelection(cookie, 1, &selection);
+        }
+        if (FAILED(hr)) logTipHresultFailure("insert-caret-adjust-failed", hr);
     }
     return true;
 }
@@ -861,30 +1109,15 @@ bool XMJDTip::endComposition(EditSession* edit, TfEditCookie cookie, bool eraseT
     return SUCCEEDED(hr);
 }
 
-// 把自己的中英状态写到用户目录，由 Host 的托盘图标显示 中/英。
-// 注意：不要写 GUID_COMPARTMENT_KEYBOARD_OPENCLOSE —— 把它置 0 等于向 TSF 宣布
-// "输入法已关闭"，框架从此不再把按键交给我们，Shift 也切不回来（0.1.5+9 的教训）。
+// Do not set KEYBOARD_OPENCLOSE: disabling the TIP would also disable Shift.
 void XMJDTip::reportImeMode(bool asciiMode) {
-    if (asciiModeKnown_ && asciiMode == lastAsciiMode_) return;
-    asciiModeKnown_ = true;
-    lastAsciiMode_ = asciiMode;
     asciiMode_ = asciiMode;
-    const auto root = xmjd::win::dataRoot();
-    if (root.empty()) return;
-    std::error_code ec;
-    const auto directory = root / L"UserData";
-    std::filesystem::create_directories(directory, ec);
-    const auto path = directory / L"ime-mode";
-    const auto temporary = path.wstring() + L".tmp";
-    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return;
-    const char* text = asciiMode ? "en\n" : "cn\n";
-    const DWORD bytes = static_cast<DWORD>(std::strlen(text));
-    DWORD written = 0;
-    const bool ok = WriteFile(file, text, bytes, &written, nullptr) != FALSE;
-    CloseHandle(file);
-    if (ok) MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+    if (!langBarItem_) {
+        logModeNotification("langbar-mode-no-item", asciiMode, S_FALSE);
+        return;
+    }
+    const HRESULT hr = langBarItem_->setAsciiMode(asciiMode);
+    logModeNotification("langbar-mode-notify", asciiMode, hr);
 }
 
 bool XMJDTip::applySnapshot(EditSession* edit, TfEditCookie cookie, const Snapshot& snapshot) {
@@ -966,7 +1199,7 @@ void XMJDTip::closeCandidateUi() noexcept {
 }
 
 bool XMJDTip::positionCandidateWindow(TfEditCookie cookie) {
-    if (!candidateWindow_ || !context_ || !composition_ || !candidateElement_ || !uiElementShow_) {
+    if (!context_ || !composition_ || !candidateElement_ || !uiElementShow_) {
         logCandidateStage("skip:no-window-or-state");
         return false;
     }
@@ -985,15 +1218,23 @@ bool XMJDTip::positionCandidateWindow(TfEditCookie cookie) {
     RECT caret{};
     BOOL clipped = FALSE;
     HRESULT hr = view->GetTextExt(cookie, range, &caret, &clipped);
-    if (FAILED(hr)) {
-        // 少数应用对整段 composition 取不到屏幕位置，退到编码末端的折叠 range。
+    if (FAILED(hr) || !usableCandidateCaret(caret)) {
+        // If the view cannot locate the full composition, try its insertion caret.
         hr = range->Collapse(cookie, TF_ANCHOR_END);
         if (SUCCEEDED(hr)) hr = view->GetTextExt(cookie, range, &caret, &clipped);
     }
+    HWND viewWindow = nullptr;
+    if (FAILED(view->GetWnd(&viewWindow))) viewWindow = nullptr;
+    if (SUCCEEDED(hr) && !usableCandidateCaret(caret) && (activationFlags_ & TF_TMF_IMMERSIVEMODE)) {
+        RECT bounds{};
+        if (SUCCEEDED(view->GetScreenExt(&bounds)) && !IsRectEmpty(&bounds)) {
+            caret = {bounds.left, bounds.top, bounds.left, std::min(bounds.bottom, bounds.top + 32L)};
+        }
+    }
     range->Release();
     view->Release();
-    if (FAILED(hr)) {
-        logCandidateStage("skip:text-ext");
+    if (FAILED(hr) || !usableCandidateCaret(caret)) {
+        logCandidateStage("skip:text-ext", static_cast<DWORD>(hr));
         return false;
     }
     if (epoch != contextEpoch_ || context.Get() != context_ || element.Get() != candidateElement_ ||
@@ -1005,20 +1246,34 @@ bool XMJDTip::positionCandidateWindow(TfEditCookie cookie) {
         logCandidateStage("skip:focus");
         return false;
     }
+    const bool layered = (activationFlags_ & TF_TMF_IMMERSIVEMODE) == 0;
+    const bool composited = !layered && !candidateCompositionFailed_;
+    const auto fallback = [&](DWORD error) {
+        logCandidateStage("composition-fallback", error);
+        candidateCompositionFailed_ = true;
+        destroyCandidateWindow();
+        return positionCandidateWindow(cookie); // At most one retry, with the opaque presenter.
+    };
+    const auto presentation = layered ? CandidatePresentation::Layered :
+                              composited ? CandidatePresentation::Composition : CandidatePresentation::Opaque;
+    if (!ensureCandidateWindow(viewWindow, presentation)) return composited ? fallback(GetLastError()) : false;
+    if (epoch != contextEpoch_ || context.Get() != context_ || element.Get() != candidateElement_ ||
+        !uiElementShow_ || !element->isShown() || !candidateWindow_) return false;
     HMONITOR monitor = MonitorFromRect(&caret, MONITOR_DEFAULTTONEAREST);
     MONITORINFO info{sizeof(info)};
     if (!monitor || !GetMonitorInfoW(monitor, &info)) {
         logCandidateStage("skip:monitor");
         return false;
     }
-    const int dpi = static_cast<int>(GetDpiForWindow(candidateWindow_));
+    const HWND owner = GetWindow(candidateWindow_, GW_OWNER);
+    const int dpi = static_cast<int>(GetDpiForWindow(owner ? owner : candidateWindow_));
     if (!candidateRenderer_) candidateRenderer_ = std::make_unique<CandidateRenderer>();
     if (!candidateRenderer_) {
         logCandidateStage("skip:renderer");
         return false;
     }
     const CandidateSnapshot& snapshot = element->snapshot();
-    if (!candidateRenderer_->prepare(snapshot.values, snapshot.selected, kMaxPopupRows, dpi == 0 ? 96 : dpi)) {
+    if (!candidateRenderer_->prepare(snapshot.values, snapshot.selected, kMaxPopupRows, dpi == 0 ? 96 : dpi, layered || composited)) {
         logCandidateStage("skip:layout");
         return false;
     }
@@ -1032,26 +1287,49 @@ bool XMJDTip::positionCandidateWindow(TfEditCookie cookie) {
     if (y + height > info.rcWork.bottom) y = caret.top - height;
     x = std::max(info.rcWork.left, std::min(x, info.rcWork.right - width));
     y = std::max(info.rcWork.top, std::min(y, info.rcWork.bottom - height));
-    if (!SetWindowPos(candidateWindow_, HWND_TOPMOST, x - margin, y - margin,
-                      width + margin * 2, height + margin * 2, SWP_NOACTIVATE)) {
-        logCandidateStage("skip:set-window-pos");
+    RECT previousBounds{};
+    const bool moved = GetWindowRect(candidateWindow_, &previousBounds) &&
+        (previousBounds.left != x - margin || previousBounds.top != y - margin ||
+         previousBounds.right - previousBounds.left != width + margin * 2 ||
+         previousBounds.bottom - previousBounds.top != height + margin * 2);
+    if (!SetWindowPos(candidateWindow_, nullptr, x - margin, y - margin,
+                      width + margin * 2, height + margin * 2, SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER)) {
+        logCandidateStage("skip:set-window-pos", GetLastError());
         return false;
     }
-    if (!candidateRenderer_->paint(candidateWindow_, dpi == 0 ? 96 : dpi, x, y)) {
-        logCandidateStage("skip:paint");
+    if (layered && !candidateRenderer_->paint(candidateWindow_, dpi == 0 ? 96 : dpi, x, y)) {
+        logCandidateStage("skip:paint", GetLastError());
         return false;
     }
-    // UpdateLayeredWindow 只更新内容，不会让隐藏窗口出现，必须显式显示。
+    if (composited) {
+        HRESULT result = E_FAIL;
+        try {
+            result = candidateRenderer_->paintComposited(candidateWindow_);
+        } catch (...) {
+            // The fallback keeps candidates usable even if pixel allocation failed.
+        }
+        if (FAILED(result)) return fallback(static_cast<DWORD>(result));
+    }
+    // Presenting content does not show a hidden window.
     if (!showCandidateWindow(true)) {
         logCandidateStage("skip:show");
         return false;
     }
-    logCandidateStage("shown");
+    if (!layered && !composited) {
+        opaqueCandidatePainted_ = false;
+        if (!InvalidateRect(candidateWindow_, nullptr, FALSE) || !UpdateWindow(candidateWindow_) ||
+            !opaqueCandidatePainted_) {
+            logCandidateStage("skip:paint-opaque", GetLastError());
+            return false;
+        }
+    }
+    if (moved) NotifyWinEvent(EVENT_OBJECT_IME_CHANGE, candidateWindow_, OBJID_CLIENT, CHILDID_SELF);
+    logCandidateStage(composited ? "shown:owned:composition" : !layered ? "shown:owned:opaque" :
+                      owner ? "shown:owned" : "shown:desktop-fallback");
     return true;
 }
 
-bool XMJDTip::createCandidateWindow() {
-    if (candidateWindow_) return true;
+bool XMJDTip::ensurePopupClass() {
     AcquireSRWLockExclusive(&g_popupClassLock);
     if (!g_popupClassRegistered) {
         WNDCLASSEXW cls{sizeof(cls)};
@@ -1064,19 +1342,59 @@ bool XMJDTip::createCandidateWindow() {
     }
     const bool registered = g_popupClassRegistered;
     ReleaseSRWLockExclusive(&g_popupClassLock);
-    if (!registered) return false;
-    candidateWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED,
-                                        kPopupClassName, L"", WS_POPUP,
-                                        0, 0, 1, 1, nullptr, nullptr, g_module, this);
-    return candidateWindow_ != nullptr;
+    return registered;
+}
+
+bool XMJDTip::ensureCandidateWindow(HWND viewWindow, CandidatePresentation presentation) {
+    if (!ensurePopupClass()) {
+        logCandidateStage("skip:register-popup-class", GetLastError());
+        return false;
+    }
+    const auto ensureOwner = [this, presentation](HWND owner) {
+        if (candidateWindow_ && GetWindow(candidateWindow_, GW_OWNER) == owner) return true;
+        const HWND window = createCandidatePopup(kPopupClassName, g_module, owner, this, presentation);
+        if (!window) return false;
+        destroyCandidateWindow();
+        candidateWindow_ = window;
+        return true;
+    };
+    DWORD error = ERROR_INVALID_WINDOW_HANDLE;
+    for (const HWND owner : candidateOwnerChoices(viewWindow, GetFocus(), GetForegroundWindow())) {
+        if (!owner || owner == candidateWindow_ || !IsWindowVisible(owner) || IsIconic(owner)) continue;
+        if (ensureOwner(owner)) return true;
+        error = GetLastError();
+    }
+    // A detached popup can dismiss the Windows Search/Start surface on click.
+    // Keep the legacy unowned fallback only for desktop text controls.
+    if (!(activationFlags_ & TF_TMF_IMMERSIVEMODE)) {
+        if (ensureOwner(nullptr)) return true;
+        error = GetLastError();
+    }
+    logCandidateStage("skip:create-candidate-window", error);
+    SetLastError(error);
+    return false;
+}
+
+void XMJDTip::destroyCandidateWindow() noexcept {
+    showCandidateWindow(false);
+    if (const HWND window = std::exchange(candidateWindow_, nullptr)) {
+        if (candidateRenderer_) candidateRenderer_->resetComposition();
+        SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+        DestroyWindow(window);
+    }
 }
 
 bool XMJDTip::showCandidateWindow(bool show) {
     if (!candidateWindow_) return !show;
     show = show && uiElementShow_;
+    const bool wasVisible = IsWindowVisible(candidateWindow_) != FALSE;
     ShowWindow(candidateWindow_, show ? SW_SHOWNOACTIVATE : SW_HIDE);
-    if (show) InvalidateRect(candidateWindow_, nullptr, TRUE);
-    return true;
+    const bool visible = IsWindowVisible(candidateWindow_) != FALSE;
+    if (wasVisible != visible) {
+        NotifyWinEvent(visible ? EVENT_OBJECT_IME_SHOW : EVENT_OBJECT_IME_HIDE,
+                       candidateWindow_, OBJID_CLIENT, CHILDID_SELF);
+    }
+    return visible == show;
 }
 
 void XMJDTip::candidateVisibilityChanged(bool shown) {
@@ -1199,14 +1517,25 @@ HRESULT XMJDTip::process(EditSession* edit, TfEditCookie cookie) {
         Response response;
         // 一旦发送，超时后的处理状态不确定，禁止把同一按键再交给宿主。
         edit->consumed_ = true;
-        if (!transact(Operation::ProcessKey, request, response) || response.status != Status::Ok) {
+        if (!transact(Operation::ProcessKey, request, response)) {
+            logTipEvent("process-key transact-failed");
+            failEngineSession(edit, cookie);
+            edit->handled_ = true;
+            return S_OK;
+        }
+        if (response.status != Status::Ok) {
+            char stage[128]{};
+            std::snprintf(stage, sizeof(stage), "process-key rejected status=%u",
+                          static_cast<unsigned>(response.status));
+            logTipEvent(stage);
             failEngineSession(edit, cookie);
             edit->handled_ = true;
             return S_OK;
         }
         if (!isValidEdit(edit)) return TF_E_DISCONNECTED;
         logKeyOutcome(edit->keycode_, response.handled != 0, response.snapshot.commitText.size(),
-                      response.snapshot.preedit.size(), response.snapshot.rawInput.size(), asciiMode_);
+                      response.snapshot.preedit.size(), response.snapshot.rawInput.size(), response.snapshot.asciiMode,
+                      request.id.sequence, (edit->modifiers_ & (kReleaseMask | kShiftTapMask)) != 0);
         if (!response.handled) {
             if (!applySnapshot(edit, cookie, response.snapshot)) {
                 failEngineSession(edit, cookie);
@@ -1255,8 +1584,8 @@ bool XMJDTip::shouldTestKey(UINT key, bool keyUp) const {
         if (asciiMode_) return false;   // 英文模式下 CapsLock 归应用
         return keyUp ? capsKeyDown_ : !capsKeyDown_;
     }
-    const bool modifier = key == VK_SHIFT || key == VK_LSHIFT || key == VK_RSHIFT ||
-        key == VK_CONTROL || key == VK_LCONTROL || key == VK_RCONTROL ||
+    if (shiftKeyCode(key, 0)) return !keyUp || shiftTap_.pending();
+    const bool modifier = key == VK_CONTROL || key == VK_LCONTROL || key == VK_RCONTROL ||
         key == VK_MENU || key == VK_LMENU || key == VK_RMENU || key == VK_LWIN || key == VK_RWIN;
     if (keyUp) return modifier && modifierKeysDown_ != 0;
     if (modifier) return true;
@@ -1285,9 +1614,10 @@ bool XMJDTip::shouldTestKey(UINT key, bool keyUp) const {
 }
 
 bool XMJDTip::translateKey(UINT virtualKey, LPARAM keyData, UINT& keycode, UINT& modifiers) const {
-    if (virtualKey == VK_SHIFT) {
-        const UINT scan = static_cast<UINT>((keyData >> 16) & 0xff);
-        virtualKey = scan == 0x36 ? VK_RSHIFT : VK_LSHIFT;
+    if (const UINT shift = shiftKeyCode(virtualKey, keyData)) {
+        keycode = shift;
+        modifiers = rimeModifiers();
+        return true;
     }
     if (virtualKey == VK_CONTROL) virtualKey = (keyData & (1LL << 24)) ? VK_RCONTROL : VK_LCONTROL;
     if (virtualKey == VK_MENU) virtualKey = (keyData & (1LL << 24)) ? VK_RMENU : VK_LMENU;
@@ -1297,8 +1627,6 @@ bool XMJDTip::translateKey(UINT virtualKey, LPARAM keyData, UINT& keycode, UINT&
         return true;
     }
     switch (virtualKey) {
-    case VK_LSHIFT: keycode = 0xffe1; modifiers = rimeModifiers(); return true;
-    case VK_RSHIFT: keycode = 0xffe2; modifiers = rimeModifiers(); return true;
     case VK_LCONTROL: keycode = 0xffe3; modifiers = rimeModifiers(); return true;
     case VK_RCONTROL: keycode = 0xffe4; modifiers = rimeModifiers(); return true;
     case VK_LMENU: keycode = 0xffe9; modifiers = rimeModifiers(); return true;
@@ -1351,49 +1679,85 @@ bool XMJDTip::translateKey(UINT virtualKey, LPARAM keyData, UINT& keycode, UINT&
     return true;
 }
 
-HRESULT XMJDTip::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM, BOOL* eaten) {
-    if (!eaten) return E_POINTER;
+HRESULT XMJDTip::OnTestKeyDown(ITfContext* context, WPARAM key, LPARAM keyData, BOOL* eaten) {
+    if (!eaten) {
+        logKeyCallback("OnTestKeyDown", static_cast<UINT>(key), keyData, context, nullptr, E_POINTER);
+        return E_POINTER;
+    }
     *eaten = FALSE;
-    if (!activated_ || !context || !isCurrentContext(context)) return S_OK;
-    *eaten = shouldTestKey(static_cast<UINT>(key), false) ? TRUE : FALSE;
-    return S_OK;
+    HRESULT result = S_OK;
+    if (activated_ && context && isCurrentContext(context)) {
+        shiftTap_.observeKeyDown(shiftKeyCode(static_cast<UINT>(key), keyData));
+        *eaten = shouldTestKey(static_cast<UINT>(key), false) ? TRUE : FALSE;
+    }
+    logKeyCallback("OnTestKeyDown", static_cast<UINT>(key), keyData, context, eaten, result);
+    return result;
 }
-HRESULT XMJDTip::OnTestKeyUp(ITfContext* context, WPARAM key, LPARAM, BOOL* eaten) {
-    if (!eaten) return E_POINTER;
+HRESULT XMJDTip::OnTestKeyUp(ITfContext* context, WPARAM key, LPARAM keyData, BOOL* eaten) {
+    if (!eaten) {
+        logKeyCallback("OnTestKeyUp", static_cast<UINT>(key), keyData, context, nullptr, E_POINTER);
+        return E_POINTER;
+    }
     *eaten = FALSE;
     if (activated_ && context && isCurrentContext(context) && shouldTestKey(static_cast<UINT>(key), true)) *eaten = TRUE;
+    logKeyCallback("OnTestKeyUp", static_cast<UINT>(key), keyData, context, eaten, S_OK);
     return S_OK;
 }
 HRESULT XMJDTip::handleKey(ITfContext* context, WPARAM key, LPARAM keyData, bool keyUp, BOOL* eaten) {
-    if (!eaten) return E_POINTER;
+    const char* callback = keyUp ? "OnKeyUp" : "OnKeyDown";
+    const auto finish = [&](HRESULT result) {
+        logKeyCallback(callback, static_cast<UINT>(key), keyData, context, eaten, result);
+        return result;
+    };
+    if (!eaten) return finish(E_POINTER);
     *eaten = FALSE;
     try {
-        if (!activated_ || !context || !isCurrentContext(context) || !shouldTestKey(static_cast<UINT>(key), keyUp)) return S_OK;
-        if (!ensureContext(context)) return S_OK;
+        if (!activated_ || !context || !isCurrentContext(context)) return finish(S_OK);
+        if (!keyUp) shiftTap_.observeKeyDown(shiftKeyCode(static_cast<UINT>(key), keyData));
+        if (!shouldTestKey(static_cast<UINT>(key), keyUp)) return finish(S_OK);
+        if (!ensureContext(context)) return finish(S_OK);
         UINT keycode = 0;
         UINT modifiers = 0;
-        if (!translateKey(static_cast<UINT>(key), keyData, keycode, modifiers)) return S_OK;
-        if (keyUp) modifiers |= kReleaseMask;
+        if (!translateKey(static_cast<UINT>(key), keyData, keycode, modifiers)) return finish(S_OK);
+        const bool shift = keycode == kLeftShiftKey || keycode == kRightShiftKey;
+        if (shift) {
+            const int otherShift = keycode == kLeftShiftKey ? VK_RSHIFT : VK_LSHIFT;
+            const bool otherModifier = (modifiers & (kMaskControl | kMaskAlt | kMaskSuper)) != 0;
+            const bool chord = otherModifier || (GetKeyState(otherShift) & 0x8000) != 0;
+            const auto now = GetTickCount64();
+            if (keyUp) {
+                if (!shiftTap_.release(keycode, now, chord)) return finish(S_OK);
+                modifiers = (modifiers & kMaskLock) | kShiftTapMask;
+            } else {
+                const bool repeated = (keyData & (1LL << 30)) != 0;
+                shiftTap_.press(keycode, now, repeated, chord);
+                if (shiftTap_.pending() && !hasEngineSession_) retryEngineSession();
+                // Let an actual modifier chord cancel any other Rime modifier
+                // gesture. An isolated Shift is processed only at release.
+                if (!otherModifier || repeated) return finish(S_OK);
+                modifiers |= kMaskShift;
+            }
+        } else if (keyUp) {
+            modifiers |= kReleaseMask;
+        }
         const bool modifier = keycode >= 0xffe1 && keycode <= 0xffee && keycode != 0xffe5;
         const UINT modifierBit = modifier ? 1u << (keycode - 0xffe1) : 0u;
-        // Rime must see modifier chords as well as Shift taps; otherwise a
-        // Ctrl+Shift shortcut could be mistaken for a lone Shift release.
-        if (modifier) {
+        if (modifier && !shift) {
             if (keyUp) modifierKeysDown_ &= ~modifierBit;
             else modifierKeysDown_ |= modifierBit;
         }
         EditSession* edit = new (std::nothrow) EditSession(this, EditAction::ProcessKey, keycode, modifiers, 0, 0, contextEpoch_);
-        if (!edit) return E_OUTOFMEMORY;
+        if (!edit) return finish(E_OUTOFMEMORY);
         HRESULT sessionResult = E_FAIL;
         const HRESULT hr = requestEdit(context, edit, TF_ES_SYNC | TF_ES_READWRITE, &sessionResult);
         *eaten = edit->consumed() || (SUCCEEDED(hr) && SUCCEEDED(sessionResult) && edit->handled()) ? TRUE : FALSE;
         if (modifier) *eaten = FALSE;
         if (key == VK_CAPITAL) capsKeyDown_ = *eaten != FALSE;
         edit->Release();
-        return S_OK;
+        return finish(S_OK);
     } catch (...) {
         *eaten = FALSE;
-        return E_UNEXPECTED;
+        return finish(E_UNEXPECTED);
     }
 }
 HRESULT XMJDTip::OnKeyDown(ITfContext* context, WPARAM key, LPARAM keyData, BOOL* eaten) {
@@ -1401,9 +1765,13 @@ HRESULT XMJDTip::OnKeyDown(ITfContext* context, WPARAM key, LPARAM keyData, BOOL
 }
 HRESULT XMJDTip::OnKeyUp(ITfContext* context, WPARAM key, LPARAM keyData, BOOL* eaten) {
     if (key == VK_CAPITAL) {
-        if (!eaten) return E_POINTER;
+        if (!eaten) {
+            logKeyCallback("OnKeyUp", static_cast<UINT>(key), keyData, context, nullptr, E_POINTER);
+            return E_POINTER;
+        }
         *eaten = capsKeyDown_ && activated_ && context && isCurrentContext(context) ? TRUE : FALSE;
         capsKeyDown_ = false;
+        logKeyCallback("OnKeyUp", static_cast<UINT>(key), keyData, context, eaten, S_OK);
         return S_OK;
     }
     return handleKey(context, key, keyData, true, eaten);
@@ -1477,28 +1845,45 @@ void XMJDTip::resetForFocusChange() {
     contextUnavailable_ = false;
     compositionTerminated_ = false;
     capsKeyDown_ = false;
+    shiftTap_.reset();
     modifierKeysDown_ = 0;
     resettingContext_ = false;
 }
 
-HRESULT XMJDTip::OnInitDocumentMgr(ITfDocumentMgr*) { return S_OK; }
+HRESULT XMJDTip::OnInitDocumentMgr(ITfDocumentMgr*) {
+    logFocusState("document-init", S_OK, true, false, foreground_, hasEngineSession_, contextEpoch_);
+    return S_OK;
+}
 HRESULT XMJDTip::OnUninitDocumentMgr(ITfDocumentMgr* document) {
-    if (document && document == documentManager_) resetForFocusChange();
+    const bool current = document && document == documentManager_;
+    logFocusState("document-uninit", S_OK, document != nullptr, context_ != nullptr,
+                  foreground_, hasEngineSession_, contextEpoch_);
+    if (current) resetForFocusChange();
     return S_OK;
 }
 HRESULT XMJDTip::OnSetFocus(ITfDocumentMgr* focused, ITfDocumentMgr*) {
     try {
+        logFocusState("document-focus-callback", S_OK, focused != nullptr, context_ != nullptr,
+                      foreground_, hasEngineSession_, contextEpoch_);
         if (!activated_ || resettingContext_) return S_OK;
         // Do not wait until the next key to invalidate candidates in another field.
         if (focused != documentManager_) resetForFocusChange();
         if (focused && foreground_) return OnSetFocus(TRUE);
         return S_OK;
-    } catch (...) { return E_UNEXPECTED; }
+    } catch (...) {
+        logFocusState("document-focus-callback-exception", E_UNEXPECTED, focused != nullptr,
+                      context_ != nullptr, foreground_, hasEngineSession_, contextEpoch_);
+        return E_UNEXPECTED;
+    }
 }
-HRESULT XMJDTip::OnPushContext(ITfContext*) {
+HRESULT XMJDTip::OnPushContext(ITfContext* context) {
+    logFocusState("context-push", S_OK, documentManager_ != nullptr, context != nullptr,
+                  foreground_, hasEngineSession_, contextEpoch_);
     return activated_ && foreground_ ? OnSetFocus(TRUE) : S_OK;
 }
 HRESULT XMJDTip::OnPopContext(ITfContext* context) {
+    logFocusState("context-pop", S_OK, documentManager_ != nullptr, context != nullptr,
+                  foreground_, hasEngineSession_, contextEpoch_);
     if (context && context == context_) resetForFocusChange();
     return activated_ && foreground_ ? OnSetFocus(TRUE) : S_OK;
 }
@@ -1506,21 +1891,34 @@ HRESULT XMJDTip::OnPopContext(ITfContext* context) {
 HRESULT XMJDTip::OnSetFocus(BOOL foreground) {
     try {
         foreground_ = foreground != FALSE;
+        logFocusState("foreground-focus", S_OK, documentManager_ != nullptr, context_ != nullptr,
+                      foreground_, hasEngineSession_, contextEpoch_);
         if (!foreground_) {
             resetForFocusChange();
+            logFocusState("foreground-focus-cleared", S_OK, false, false,
+                          foreground_, hasEngineSession_, contextEpoch_);
             return S_OK;
         }
         ITfContext* context = nullptr;
         ITfDocumentMgr* document = nullptr;
-        if (SUCCEEDED(getFocusedContext(&context, &document))) {
-            if (ensureContext(context) && !hasEngineSession_) scheduleEngineRetry();
+        const HRESULT focusResult = getFocusedContext(&context, &document);
+        if (SUCCEEDED(focusResult)) {
+            const bool adopted = ensureContext(context);
+            logFocusState("focused-context-result", adopted ? S_OK : TF_E_DISCONNECTED,
+                          document != nullptr, context != nullptr, foreground_,
+                          hasEngineSession_, contextEpoch_);
+            if (adopted && !hasEngineSession_) scheduleEngineRetry();
             releaseInterface(context);
             releaseInterface(document);
         } else {
+            logFocusState("focused-context-failed", focusResult, document != nullptr,
+                          context != nullptr, foreground_, hasEngineSession_, contextEpoch_);
             resetForFocusChange();
         }
         return S_OK;
     } catch (...) {
+        logFocusState("foreground-focus-exception", E_UNEXPECTED, documentManager_ != nullptr,
+                      context_ != nullptr, foreground_, hasEngineSession_, contextEpoch_);
         return E_UNEXPECTED;
     }
 }
@@ -1537,12 +1935,16 @@ LRESULT CALLBACK XMJDTip::popupWndProc(HWND window, UINT message, WPARAM wParam,
         SetWindowLongPtrW(window, GWLP_USERDATA, 0);
         if (owner && owner->candidateWindow_ == window) {
             owner->candidateWindow_ = nullptr;
+            if (owner->candidateRenderer_) owner->candidateRenderer_->resetComposition();
+        }
+        if (owner && owner->engineRetryWindow_ == window) {
+            owner->engineRetryWindow_ = nullptr;
             owner->engineRetryScheduled_ = false;
         }
         return DefWindowProcW(window, message, wParam, lParam);
     }
     ComPtr<XMJDTip> keepAlive = owner;
-    if (message == WM_TIMER && wParam == kEngineRetryTimerId && owner) {
+    if (message == WM_TIMER && wParam == kEngineRetryTimerId && owner && owner->engineRetryWindow_ == window) {
         try {
             if (!owner->processingEdit_) owner->retryEngineSession();
         } catch (...) {
@@ -1558,13 +1960,27 @@ LRESULT CALLBACK XMJDTip::popupWndProc(HWND window, UINT message, WPARAM wParam,
     }
     if (message == WM_PAINT) {
         PAINTSTRUCT paint{};
-        BeginPaint(window, &paint);
+        const HDC dc = BeginPaint(window, &paint);
+        if (dc && owner && window == owner->candidateWindow_ && owner->candidateRenderer_ &&
+            (GetWindowLongPtrW(window, GWL_EXSTYLE) & (WS_EX_LAYERED | WS_EX_NOREDIRECTIONBITMAP)) == 0) {
+            try {
+                RECT client{};
+                owner->opaqueCandidatePainted_ = GetClientRect(window, &client) &&
+                    owner->candidateRenderer_->paintOpaque(dc, client);
+            } catch (...) {
+                owner->opaqueCandidatePainted_ = false;
+            }
+        }
         EndPaint(window, &paint);
         return 0;
     }
-    if (message == WM_DPICHANGED && owner && owner->candidateRenderer_) {
-        const UINT dpi = GetDpiForWindow(window);
-        owner->candidateRenderer_->repaint(window, static_cast<int>(dpi == 0 ? 96 : dpi));
+    if (message == WM_DPICHANGED && owner && window == owner->candidateWindow_ && owner->candidateRenderer_) {
+        if ((GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_LAYERED) != 0) {
+            const UINT dpi = GetDpiForWindow(window);
+            owner->candidateRenderer_->repaint(window, static_cast<int>(dpi == 0 ? 96 : dpi));
+        } else {
+            InvalidateRect(window, nullptr, FALSE);
+        }
         return 0;
     }
     if (message == WM_LBUTTONUP && owner && owner->candidateElement_ && owner->candidateRenderer_) {

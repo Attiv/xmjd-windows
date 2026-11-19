@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param([Parameter(Mandatory = $true)][string] $InstallerPath)
 
 $ErrorActionPreference = 'Stop'
@@ -25,13 +25,13 @@ function Assert-InstalledPayload([string] $MissingPath = '') {
     foreach ($entry in $script:installedManifest.files) {
         $file = Join-Path $script:installRoot $entry.path
         if ($entry.path -eq $MissingPath) {
-            if (Test-Path -LiteralPath $file) { throw "故障注入的文件意外存在：$MissingPath" }
+            if (Test-Path -LiteralPath $file) { throw "Fault-injected file unexpectedly exists: $MissingPath" }
             continue
         }
         if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or
             (Get-Item -LiteralPath $file).Length -ne $entry.size -or
             (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256) {
-            throw "安装文件与 manifest 不一致：$($entry.path)"
+            throw "Installed file does not match the manifest: $($entry.path)"
         }
     }
 }
@@ -85,6 +85,12 @@ Assert-Registration $false
 $powerShell = Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
 Invoke-CheckedProcess $resolvedInstaller ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG="' + (Join-Path $logRoot 'install.log') + '"')
 Assert-Registration $true
+# Inspect the effective TSF capability bits in both registry/COM views. Merely
+# finding the COM DLL and language profile misses desktop-only registrations.
+foreach ($architecture in @('x64', 'x86')) {
+    $registrationCheck = Join-Path $windowsRoot "out/build/$architecture/Release/XMJDTipComTests.exe"
+    Invoke-CheckedProcess $registrationCheck '--check-registration'
+}
 $repeat = Start-Process -FilePath $resolvedInstaller -ArgumentList ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG="' + (Join-Path $logRoot 'repeat-install.log') + '"') -Wait -PassThru
 if ($repeat.ExitCode -eq 0) { throw 'Installer unexpectedly accepted an existing version directory.' }
 Assert-Registration $true
@@ -111,16 +117,19 @@ $customConfig = Get-Content -LiteralPath (Join-Path $settingsRoot 'UserData/Rime
 if ($customConfig -notmatch '(?m)^\s+- schema: pinyin_simp\s*$') {
     throw 'Settings did not write schema_list to default.custom.yaml.'
 }
-$settingsShortcut = Join-Path $env:ProgramData 'Microsoft/Windows/Start Menu/Programs/星猫键道/星猫键道设置.lnk'
+# Keep the test script ASCII-compatible with Windows PowerShell 5.1.
+$brandName = ConvertFrom-Json '"\u661f\u732b\u952e\u9053"'
+$settingsName = $brandName + (ConvertFrom-Json '"\u8bbe\u7f6e"')
+$settingsShortcut = Join-Path $env:ProgramData "Microsoft/Windows/Start Menu/Programs/$brandName/$settingsName.lnk"
 if (-not (Test-Path -LiteralPath $settingsShortcut -PathType Leaf)) { throw 'Missing Start Menu settings shortcut.' }
 
-# 候选皮肤：默认系统皮肤、切换后在 active.json 中持久化，并能由设置程序重新读回。
+# Verify the default skin and persistence across Settings launches.
 $styleListFile = Join-Path $logRoot 'styles.txt'
 $styleList = Start-Process -FilePath $settingsExe -ArgumentList '--styles' -Wait -PassThru -RedirectStandardOutput $styleListFile
 if ($styleList.ExitCode -ne 0) { throw "Settings style listing failed: $($styleList.ExitCode)" }
 $styleText = [IO.File]::ReadAllText($styleListFile, [Text.Encoding]::UTF8)
-if ($styleText -notmatch 'active=system') { throw '默认候选皮肤不是「系统简约」。' }
-if ($styleText -notmatch 'builtin orbit') { throw '缺少内置「星轨」皮肤。' }
+if ($styleText -notmatch 'active=system') { throw 'The system skin is not active by default.' }
+if ($styleText -notmatch 'builtin orbit') { throw 'The built-in orbit skin is missing.' }
 $stylePick = Start-Process -FilePath $settingsExe -ArgumentList '--select-style orbit' -Wait -PassThru
 if ($stylePick.ExitCode -ne 0) { throw "Settings style selection failed: $($stylePick.ExitCode)" }
 $activeStylePath = Join-Path $settingsRoot 'CandidateStyles/active.json'
@@ -128,34 +137,34 @@ if (-not (Test-Path -LiteralPath $activeStylePath -PathType Leaf)) { throw 'Cand
 if ((Get-Content -LiteralPath $activeStylePath -Raw) -notmatch '"id":\s*"orbit"') { throw 'active.json does not contain the selected style.' }
 $styleList2 = Start-Process -FilePath $settingsExe -ArgumentList '--styles' -Wait -PassThru -RedirectStandardOutput $styleListFile
 if ($styleList2.ExitCode -ne 0 -or [IO.File]::ReadAllText($styleListFile, [Text.Encoding]::UTF8) -notmatch 'active=orbit') {
-    throw '设置程序无法重新读回已启用的皮肤。'
+    throw 'Settings did not restore the active skin.'
 }
 Write-Output 'PASS: settings app self-check, candidate style selection and persistence.'
 
-# 方案来源：导入一个含最小 schema 的目录，文件必须落在星猫自己的用户目录，且出现在方案列表。
+# Import a minimal schema and check its files and list entry.
 $schemeFixture = Join-Path $logRoot 'ci-scheme-source'
 Remove-Item -LiteralPath $schemeFixture -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $schemeFixture | Out-Null
 [IO.File]::WriteAllText((Join-Path $schemeFixture 'ci_test.schema.yaml'),
-    "schema:`n  schema_id: ci_test`n  name: CI 测试方案`n")
+    "schema:`n  schema_id: ci_test`n  name: CI $(ConvertFrom-Json '"\u6d4b\u8bd5\u65b9\u6848"')`n")
 $importScheme = Start-Process -FilePath $settingsExe -ArgumentList ('--import-scheme "' + $schemeFixture + '"') -Wait -PassThru -RedirectStandardOutput (Join-Path $logRoot 'import-scheme.txt')
 if ($importScheme.ExitCode -ne 0) { throw "Settings scheme import failed: $($importScheme.ExitCode)" }
 $importedSchema = Join-Path $settingsRoot 'UserData/Rime/imported/ci-scheme-source/ci_test.schema.yaml'
-if (-not (Test-Path -LiteralPath $importedSchema -PathType Leaf)) { throw '导入的方案没有复制到用户目录。' }
+if (-not (Test-Path -LiteralPath $importedSchema -PathType Leaf)) { throw 'The imported schema was not copied into user data.' }
 if (-not (Select-String -LiteralPath (Join-Path $settingsRoot 'settings.ini') -Pattern '^scheme_source=' -Quiet)) {
-    throw '方案来源没有写入设置文件。'
+    throw 'Settings did not record the external schema source.'
 }
 $schemaListFile = Join-Path $logRoot 'schemas.txt'
 $schemaList = Start-Process -FilePath $settingsExe -ArgumentList '--schemas' -Wait -PassThru -RedirectStandardOutput $schemaListFile
 if ($schemaList.ExitCode -ne 0) { throw "Settings schema listing failed: $($schemaList.ExitCode)" }
 $schemaText = [IO.File]::ReadAllText($schemaListFile, [Text.Encoding]::UTF8)
-if ($schemaText -notmatch 'schema ci_test ') { throw '导入的方案没有出现在方案列表。' }
-if ($schemaText -notmatch '(?m)^schema ci_test .* imported\r?$') { throw '导入方案未标记为用户目录来源。' }
+if ($schemaText -notmatch 'schema ci_test ') { throw 'The imported schema is missing from the schema list.' }
+if ($schemaText -notmatch '(?m)^schema ci_test .* imported\r?$') { throw 'The schema list does not mark the schema as imported.' }
 $settingsCheckAfterImport = Start-Process -FilePath $settingsExe -ArgumentList '--check' -Wait -PassThru
-if ($settingsCheckAfterImport.ExitCode -ne 0) { throw "导入方案后自检失败：$($settingsCheckAfterImport.ExitCode)" }
+if ($settingsCheckAfterImport.ExitCode -ne 0) { throw "Settings self-check after import failed: $($settingsCheckAfterImport.ExitCode)" }
 $removeSchemes = Start-Process -FilePath $settingsExe -ArgumentList '--remove-schemes' -Wait -PassThru
 if ($removeSchemes.ExitCode -ne 0) { throw "Removing imported schemes failed: $($removeSchemes.ExitCode)" }
-if (Test-Path -LiteralPath (Join-Path $settingsRoot 'UserData/Rime/imported')) { throw '移除导入方案后目录仍然存在。' }
+if (Test-Path -LiteralPath (Join-Path $settingsRoot 'UserData/Rime/imported')) { throw 'The imported data directory survived removal.' }
 Write-Output 'PASS: scheme import, listing, self-check and removal.'
 Invoke-CheckedProcess $powerShell ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $installRoot 'scripts/register.ps1') + '" -InstallDirectory "' + $installRoot + '"')
 Assert-Registration $true
@@ -179,12 +188,12 @@ try {
     if ($failedUninstall.ExitCode -eq 0) { throw 'Uninstaller did not report failed unregistration.' }
     Assert-InstalledPayload
     if (-not (Test-Path -LiteralPath $uninstaller)) { throw 'Failed uninstall removed its retry entry point.' }
-    # 所有权不匹配时 /REPAIR 也必须在写入和注销前拒绝。
+    # /REPAIR must reject mismatched ownership before writing or unregistering.
     $blockedRepair = Start-Process -FilePath $resolvedInstaller -ArgumentList ('/REPAIR /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG="' + (Join-Path $logRoot 'blocked-repair.log') + '"') -Wait -PassThru
-    if ($blockedRepair.ExitCode -eq 0) { throw '修复意外接受了不匹配的 Host 所有权。' }
+    if ($blockedRepair.ExitCode -eq 0) { throw 'Repair accepted mismatched Host ownership.' }
     Assert-InstalledPayload
     if ($metadata.GetValue('HostExecutablePath') -ne (Join-Path $installRoot 'ownership-mismatch.exe')) {
-        throw '被拒绝的修复修改了 Host 所有权。'
+        throw 'The rejected repair changed Host ownership.'
     }
 } finally {
     $metadata.SetValue('HostExecutablePath', (Join-Path $installRoot 'XMJDHost.exe'))
@@ -192,20 +201,20 @@ try {
     $base.Dispose()
 }
 Assert-Registration $true
-# 仅删除一次性 runner 的 ProgramFiles 测试安装中的 x86 DLL。
-# 缺失文件应阻止真实卸载；修复必须从安装包恢复，再重建双架构注册。
+# Remove only the x86 DLL in the disposable runner install. Uninstall must fail
+# with the file missing; repair must restore it and rebuild both registrations.
 $missingPath = 'Tip/x86/XMJDTip.dll'
 $missingFile = Join-Path $installRoot $missingPath
 Remove-Item -LiteralPath $missingFile -Force
 $missingUninstall = Start-Process -FilePath $uninstaller -ArgumentList ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' + (Join-Path $logRoot 'missing-dll-uninstall.log') + '"') -Wait -PassThru
-if ($missingUninstall.ExitCode -eq 0) { throw '缺失 x86 DLL 时卸载未报告失败。' }
+if ($missingUninstall.ExitCode -eq 0) { throw 'Uninstall did not fail when the x86 DLL was missing.' }
 Assert-InstalledPayload $missingPath
 if (-not (Test-Path -LiteralPath $uninstaller) -or
     -not (Test-Path -LiteralPath (Join-Path $installRoot 'unins000.dat'))) {
-    throw '卸载失败删除了修复需要的 Inno 卸载入口。'
+    throw 'The failed uninstall removed the Inno uninstaller needed for repair.'
 }
 Assert-Registration $true
-# 模拟本实例的部分注册，确保修复确实先注销；直接 register 会拒绝此状态。
+# Simulate a partial registration: repair must unregister before registering.
 $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
 $metadata = $base.OpenSubKey('Software\XMJD', $true)
 try { $metadata.DeleteValue('RegistrationComplete', $true) } finally {
@@ -215,11 +224,11 @@ try { $metadata.DeleteValue('RegistrationComplete', $true) } finally {
 Invoke-CheckedProcess $resolvedInstaller ('/REPAIR /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG="' + (Join-Path $logRoot 'repair.log') + '"')
 Assert-InstalledPayload
 if ((Get-FileHash -LiteralPath (Join-Path $installRoot 'manifest.json') -Algorithm SHA256).Hash -ne $manifestHash) {
-    throw '修复后的 manifest 与安装包不一致。'
+    throw 'The repaired manifest does not match the installation package.'
 }
 Assert-Registration $true
 if (-not (Test-Path -LiteralPath $sentinel) -or [IO.File]::ReadAllText($sentinel) -ne $sentinelText) {
-    throw '修复未保留用户数据。'
+    throw 'Repair did not preserve user data.'
 }
 Invoke-CheckedProcess $uninstaller ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="' + (Join-Path $logRoot 'uninstall.log') + '"')
 Assert-Registration $false

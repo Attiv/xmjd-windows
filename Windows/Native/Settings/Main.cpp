@@ -554,21 +554,24 @@ bool deployNow(std::wstring& error) {
     request.operation = xmjd::Operation::Deploy;
     request.id.connectionEpoch = client.epoch();
     request.id.sequence = 1;
+    const ULONGLONG started = GetTickCount64();
     const auto response = client.transact(request, kDeployTimeoutMs, true);
+    const auto elapsed = GetTickCount64() - started;
     if (!response) {
-        error = L"部署超时或引擎连接中断。请查看日志后重试。";
-        appendLog(L"deploy transport failure");
+        error = L"未收到有效的部署结果（用时 " + std::to_wstring(elapsed / 1000) +
+                L" 秒），暂不能确认是否完成。请先检查引擎状态和日志。";
+        appendLog(L"deploy transport failure elapsed_ms=" + std::to_wstring(elapsed));
         return false;
     }
     if (response->status == xmjd::Status::Ok && response->handled) {
-        appendLog(L"deploy ok");
+        appendLog(L"deploy ok elapsed_ms=" + std::to_wstring(elapsed));
         return true;
     }
-    const int code = static_cast<int>(response->snapshot.page);
+    const auto code = response->diagnosticCode;
     error = L"部署失败（" + xmjd::win::widen(xmjd::statusName(response->status)) +
             L"，错误码 " + std::to_wstring(code) + L"）。请查看日志后重试。";
     appendLog(L"deploy failed status=" + xmjd::win::widen(xmjd::statusName(response->status)) +
-              L" code=" + std::to_wstring(code));
+              L" code=" + std::to_wstring(code) + L" elapsed_ms=" + std::to_wstring(elapsed));
     return false;
 }
 

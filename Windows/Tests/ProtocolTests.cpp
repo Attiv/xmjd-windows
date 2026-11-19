@@ -98,6 +98,7 @@ public:
         result.caretUtf8Offset = result.preedit.size();
         result.pageSize = 2;
         result.candidates = {{"一", "", "1"}, {"二", "", "2"}};
+        result.asciiMode = asciiMode;
         return result;
     }
 
@@ -109,6 +110,7 @@ public:
     bool throwOnDestroy = false;
     bool throwOnSnapshot = false;
     bool handleProcess = true;
+    bool asciiMode = false;
     mutable std::size_t readyCalls = 0;
     std::uint64_t nextId = 1;
     std::size_t createAttempts = 0;
@@ -160,6 +162,11 @@ int testUnicodeAndCodec() {
     CHECK(!decodeRequest("{\"version\":1,\"connectionEpoch\":77,\"sessionId\":0,\"contextEpoch\":0,\"sequence\":1.0,\"operation\":\"health\",\"payload\":{}}"));
     CHECK(!decodeRequest("{\"version\":1,\"connectionEpoch\":77,\"sessionId\":0,\"contextEpoch\":0,\"sequence\":1,\"operation\":\"health\",\"payload\":{},}"));
     CHECK(!decodeRequest("{\"version\":1,\"connectionEpoch\":77,\"sessionId\":0,\"contextEpoch\":0,\"sequence\":1,\"operation\":\"health\",\"payload\":{\"unused\":[],}}"));
+    const Request shutdown = request(Operation::Shutdown, 1);
+    const auto decodedShutdown = decodeRequest(encodeRequest(shutdown));
+    CHECK(decodedShutdown && decodedShutdown->operation == Operation::Shutdown);
+    CHECK(decodedShutdown->id == shutdown.id);
+    CHECK(!decodeRequest("{\"version\":1,\"connectionEpoch\":77,\"sessionId\":0,\"contextEpoch\":0,\"sequence\":1,\"operation\":\"shutdown\",\"payload\":{\"keycode\":1,\"modifiers\":0}}"));
     const auto bytes = frame(encoded);
     CHECK(bytes.size() == encoded.size() + 4);
     CHECK(bytes[0] == static_cast<std::uint8_t>(encoded.size() & 0xff));
@@ -179,6 +186,17 @@ int testUnicodeAndCodec() {
     CHECK(decodedResponse.has_value());
     CHECK(decodedResponse->snapshot.caretUtf8Offset == 5);
     CHECK(decodedResponse->snapshot.candidates.size() == 1);
+    CHECK(decodedResponse->diagnosticCode == 0);
+
+    Response deployFailure;
+    deployFailure.id = request(Operation::Deploy, 1).id;
+    deployFailure.status = Status::EngineFailure;
+    deployFailure.diagnosticCode = 16;
+    const std::string deployFailureText = encodeResponse(deployFailure);
+    CHECK(!deployFailureText.empty());
+    const auto decodedDeployFailure = decodeResponse(deployFailureText);
+    CHECK(decodedDeployFailure && decodedDeployFailure->diagnosticCode == 16);
+    CHECK(decodedDeployFailure->snapshot.page == 0);
     std::string trailingCommaResponse = responseText;
     trailingCommaResponse.insert(trailingCommaResponse.size() - 1, ",");
     CHECK(!decodeResponse(trailingCommaResponse));
@@ -199,6 +217,36 @@ int testUnicodeAndCodec() {
     invalidResponseText.replace(handledOffset, std::string("\"handled\":false").size(), "\"handled\":true");
     invalidResponseText.replace(statusOffset, std::string("\"status\":\"ok\"").size(), "\"status\":\"engineFailure\"");
     CHECK(!decodeResponse(invalidResponseText));
+    return 0;
+}
+
+int testCandidateAppearance() {
+    Request create = request(Operation::CreateSession, 1, 0, 9);
+    const auto legacy = decodeRequest(encodeRequest(create));
+    CHECK(legacy && !legacy->wantsAppearance);
+    create.wantsAppearance = true;
+    const auto preferred = decodeRequest(encodeRequest(create));
+    CHECK(preferred && preferred->wantsAppearance && preferred->operation == Operation::CreateSession);
+    Request notCreate = request(Operation::Health, 1);
+    notCreate.wantsAppearance = true;
+    CHECK(encodeRequest(notCreate).empty());
+    CHECK(!decodeRequest(R"({"version":1,"connectionEpoch":77,"sessionId":0,"contextEpoch":0,"sequence":1,"operation":"health","payload":{"wantsAppearance":false}})"));
+
+    Response response;
+    response.id = create.id;
+    response.id.sessionId = 1;
+    response.handled = true;
+    const auto classic = encodeResponse(response);
+    CHECK(!classic.empty() && classic.find("candidateStyle") == std::string::npos);
+    response.appearance = Response::CandidateAppearance{R"({"name":"节庆流光","id":"fiesta"})", true};
+    const auto encoded = encodeResponse(response);
+    const auto decoded = decodeResponse(encoded);
+    CHECK(decoded && decoded->appearance && decoded->appearance->dark &&
+          decoded->appearance->json == response.appearance->json);
+    CHECK(!decodeResponse(classic.substr(0, classic.size() - 1) + R"(,"candidateDark":true})"));
+    CHECK(!decodeResponse(classic.substr(0, classic.size() - 1) + R"(,"candidateStyle":"{}"})"));
+    response.appearance->json.assign(kMaxCandidateAppearanceBytes + 1, 'a');
+    CHECK(encodeResponse(response).empty());
     return 0;
 }
 
@@ -251,6 +299,7 @@ int testDecoderLimits() {
         {"\"status\":\"ok\"", "\"status\":\"unknown\""},
         {"\"handled\":false", "\"handled\":false,\"handled\":false"},
         {"\"handled\":false", "\"handled\":0"},
+        {"\"handled\":false", "\"handled\":false,\"diagnosticCode\":4294967296"},
         {"\"revision\":0", "\"revision\":0.0"},
         {"\"revision\":0", "\"revision\":9007199254740992"},
         {"\"caretUtf8Offset\":5", "\"caretUtf8Offset\":2"},
@@ -342,13 +391,13 @@ int testUnhandledSnapshotFailure() {
         CHECK(failed.snapshot.commitText.empty());
         CHECK(failed.snapshot.rawInput.empty());
         CHECK(failed.snapshot.preedit.empty());
-        CHECK(engine.snapshotCalls == 1);
+        CHECK(engine.snapshotCalls == 3);
         CHECK(engine.states.empty());
         CHECK(engine.destroyed == 2);
         CHECK(broker.dispatch(request(Operation::Health, 4)).status == Status::Unavailable);
         CHECK(broker.dispatch(request(Operation::CreateSession, 5, 0, 11)).status == Status::Unavailable);
         CHECK(engine.created == 2);
-        CHECK(engine.snapshotCalls == 1);
+        CHECK(engine.snapshotCalls == 3);
     }
     return 0;
 }
@@ -358,9 +407,12 @@ int testModifierSideEffects() {
     // kNoop. It must reach TSF once while native Shift itself passes through.
     FakeEngine engine;
     engine.handleProcess = false;
+    engine.asciiMode = true;
     BrokerConnection broker(engine);
     const Response created = broker.dispatch(request(Operation::CreateSession, 1, 0, 9));
     CHECK(created.status == Status::Ok);
+    CHECK(created.snapshot.asciiMode);
+    CHECK(created.snapshot.candidates.empty());
     engine.states.begin()->second.commit = "ni";
     Request release = request(Operation::ProcessKey, 2, created.id.sessionId, 9);
     release.keycode = 0xffe1;
@@ -374,7 +426,7 @@ int testModifierSideEffects() {
     CHECK(broker.dispatch(release).status == Status::Stale);
     release.id.sequence = 3;
     CHECK(broker.dispatch(release).snapshot.commitText.empty());
-    CHECK(engine.snapshotCalls == 2);
+    CHECK(engine.snapshotCalls == 3);
     CHECK(decodeResponse(encodeResponse(switched))->snapshot.commitText == "ni");
     return 0;
 }
@@ -612,11 +664,11 @@ int testBroker() {
     CHECK(unhandled.snapshot.caretUtf8Offset == 2);
     CHECK(unhandled.snapshot.candidates.size() == 2);
     CHECK(unhandled.snapshot.revision == 0);
-    CHECK(unhandledEngine.snapshotCalls == 1);
+    CHECK(unhandledEngine.snapshotCalls == 2);
     CHECK(unhandledEngine.states.at(engineSession).commit == "pending");
     CHECK(unhandledBroker.dispatch(unhandledKey).status == Status::Stale);
     CHECK(unhandledEngine.processed == 1);
-    CHECK(unhandledEngine.snapshotCalls == 1);
+    CHECK(unhandledEngine.snapshotCalls == 2);
     CHECK(unhandledEngine.states.at(engineSession).commit == "pending");
     const auto decodedUnhandled = decodeResponse(encodeResponse(unhandled));
     CHECK(decodedUnhandled.has_value());
@@ -642,7 +694,7 @@ int testBroker() {
     CHECK(handledAfterUnhandled.snapshot.commitText == "pending");
     CHECK(handledAfterUnhandled.snapshot.rawInput == "niy");
     CHECK(handledAfterUnhandled.snapshot.revision == 1);
-    CHECK(unhandledEngine.snapshotCalls == 3);
+    CHECK(unhandledEngine.snapshotCalls == 4);
     CHECK(unhandledEngine.states.at(engineSession).commit.empty());
     handledKey.id.sequence = 5;
     const Response afterDrained = unhandledBroker.dispatch(handledKey);
@@ -712,6 +764,7 @@ int testBroker() {
 
 int main() {
     if (const int result = testUnicodeAndCodec(); result != 0) return result;
+    if (const int result = testCandidateAppearance(); result != 0) return result;
     if (const int result = testDecoderLimits(); result != 0) return result;
     if (const int result = testModifierSideEffects(); result != 0) return result;
     if (const int result = testCreateFailureIdentity(); result != 0) return result;

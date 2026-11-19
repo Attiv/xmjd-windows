@@ -14,6 +14,11 @@ inline constexpr std::size_t kMaxTextBytes = 128 * 1024;
 inline constexpr std::size_t kMaxCandidates = 128;
 inline constexpr std::uint32_t kInputDeadlineMs = 50;
 inline constexpr std::uint32_t kReleaseMask = 1u << 30;
+// TIP qualifies the physical gesture before sending it in one ProcessKey.
+inline constexpr std::uint32_t kShiftTapMask = 1u << 31;
+inline constexpr std::uint32_t kLeftShiftKey = 0xffe1;
+inline constexpr std::uint32_t kRightShiftKey = 0xffe2;
+inline constexpr std::size_t kMaxCandidateAppearanceBytes = 16 * 1024;
 
 enum class Operation { Health, CreateSession, ProcessKey, SelectCandidate, Finalize, Cancel, DestroySession, Deploy, Shutdown };
 enum class Status { Ok, Unavailable, Busy, Stale, UnsupportedVersion, InvalidRequest, EngineFailure };
@@ -33,6 +38,7 @@ struct Request {
     std::uint32_t candidateIndex = 0; // Index on the current Rime page, never an invented selection key.
     std::uint64_t snapshotRevision = 0;
     bool convert = true;
+    bool wantsAppearance = false; // Opt-in on CreateSession; legacy replies stay unchanged.
 };
 struct Candidate {
     std::string text;
@@ -56,7 +62,13 @@ struct Response {
     Identity id;
     Status status = Status::Ok;
     bool handled = false;
+    std::uint32_t diagnosticCode = 0;
     Snapshot snapshot;
+    struct CandidateAppearance {
+        std::string json;
+        bool dark = false;
+    };
+    std::optional<CandidateAppearance> appearance;
 };
 
 // All decoders reject malformed UTF-8, wrong types, negative/out-of-range integers,

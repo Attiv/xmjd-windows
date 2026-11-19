@@ -247,7 +247,7 @@ add_library(XMJDTip SHARED
 target_include_directories(XMJDTip PRIVATE "${XMJD_GENERATED_DIR}")
 target_link_libraries(XMJDTip PRIVATE
   xmjd_windows_common
-  ole32 oleaut32 uuid advapi32 user32 gdi32 gdiplus shell32 shlwapi)
+  ole32 oleaut32 uuid advapi32 user32 gdi32 gdiplus shell32 shlwapi dcomp d3d11)
 set_target_properties(XMJDTip PROPERTIES
   OUTPUT_NAME XMJDTip
   PREFIX ""
@@ -374,7 +374,7 @@ if(XMJD_ARCH STREQUAL "x64")
   # --deploy/--probe/--health 的输出照常可见。
   target_link_options(XMJDHost PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup)
   target_include_directories(XMJDHost PRIVATE "${XMJD_RIME_INCLUDE_DIR}" "${XMJD_GENERATED_DIR}")
-  target_link_libraries(XMJDHost PRIVATE xmjd_windows_common ole32 advapi32 shell32)
+  target_link_libraries(XMJDHost PRIVATE xmjd_windows_common ole32 advapi32 userenv)
   add_custom_command(TARGET XMJDHost POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${XMJD_RIME_DLLS} "$<TARGET_FILE_DIR:XMJDHost>"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
@@ -394,11 +394,11 @@ if(XMJD_ARCH STREQUAL "x64")
     target_include_directories(RimeRuntimeTests PRIVATE "${XMJD_RIME_INCLUDE_DIR}" "${XMJD_GENERATED_DIR}")
     target_link_libraries(RimeRuntimeTests PRIVATE xmjd_windows_common ole32)
     add_dependencies(RimeRuntimeTests XMJDHost)
-    # 真实运行时会写入当前用户产品目录，仅在 CI 注册，并由测试拒绝已有数据。
-    if("$ENV{GITHUB_ACTIONS}" STREQUAL "true")
-      add_test(NAME RimeRuntimeTests COMMAND RimeRuntimeTests "$<TARGET_FILE_DIR:XMJDHost>")
-      set_tests_properties(RimeRuntimeTests PROPERTIES RUN_SERIAL TRUE TIMEOUT 600 LABELS "integration;librime")
-    endif()
+    add_test(NAME RimeSettingsSchemaTests COMMAND RimeRuntimeTests --settings-schema)
+    set_tests_properties(RimeSettingsSchemaTests PROPERTIES LABELS "unit;settings")
+    # The real engine uses an isolated, fresh test directory, not LocalAppData/XMJD.
+    add_test(NAME RimeRuntimeTests COMMAND RimeRuntimeTests "$<TARGET_FILE_DIR:XMJDHost>")
+    set_tests_properties(RimeRuntimeTests PROPERTIES RUN_SERIAL TRUE TIMEOUT 600 LABELS "integration;librime")
   endif()
   install(TARGETS XMJDHost RUNTIME DESTINATION .)
   install(FILES ${XMJD_RIME_DLLS}
@@ -415,10 +415,21 @@ else()
 endif()
 
 if(BUILD_TESTING)
-  add_executable(XMJDTipComTests Tests/TipComTests.cpp)
-  target_link_libraries(XMJDTipComTests PRIVATE ole32 uuid)
+  add_executable(XMJDTipComTests Tests/TipComTests.cpp Native/Tip/CandidateComposition.cpp Native/Tip/CandidateRenderer.cpp)
+  target_link_libraries(XMJDTipComTests PRIVATE xmjd_windows_common ole32 uuid advapi32 userenv user32 gdi32 dcomp d3d11)
   add_dependencies(XMJDTipComTests XMJDTip)
   add_test(NAME XMJDTipComTests COMMAND XMJDTipComTests "$<TARGET_FILE:XMJDTip>")
+  add_executable(LangBarItemTests
+    Tests/LangBarItemTests.cpp
+    Native/Tip/LangBarItem.cpp)
+  target_include_directories(LangBarItemTests PRIVATE "${XMJD_ROOT}/Native/Tip")
+  target_link_libraries(LangBarItemTests PRIVATE ole32 oleaut32 uuid gdiplus user32 gdi32)
+  set_target_properties(LangBarItemTests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+  add_test(NAME LangBarItemTests COMMAND LangBarItemTests)
+  add_test(NAME PipeSecurityTests COMMAND XMJDTipComTests --check-pipe-security)
+  add_test(NAME PipeFinalReplyTests COMMAND XMJDTipComTests --check-final-pipe-reply)
+  add_test(NAME ShiftTapTests COMMAND XMJDTipComTests --check-shift-tap)
+  add_test(NAME CandidatePopupTests COMMAND XMJDTipComTests --check-candidate-popup)
   add_executable(EditorHarness WIN32 Tests/EditorHarness.cpp)
   target_link_libraries(EditorHarness PRIVATE user32)
   add_test(NAME EditorHarness COMMAND EditorHarness --smoke)

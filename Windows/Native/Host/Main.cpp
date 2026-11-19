@@ -1,5 +1,6 @@
 #include "RimeRuntime.h"
 #include "../Common/Pipe.h"
+#include "../Common/CandidatePainter.h"
 #include "../Protocol/Broker.h"
 
 #include <array>
@@ -18,12 +19,8 @@
 #include <utility>
 #include <vector>
 #include <windows.h>
-// WIN32_LEAN_AND_MEAN 会把 shellapi / objidl 排除在 windows.h 之外；
-// 托盘图标和 GDI+ 画的中英图标分别需要它们。
-#include <shellapi.h>
-#include <objidl.h>
-#include <gdiplus.h>
 #include <sddl.h>
+#include <userenv.h>
 
 static_assert(sizeof(void*) == 8, "XMJDHost 只支持 x64 构建");
 #if !defined(_M_X64) && !defined(__x86_64__)
@@ -40,6 +37,51 @@ constexpr int kExitRuntime = 6;
 constexpr int kExitPipe = 7;
 
 std::atomic<HANDLE> g_stopEvent{nullptr};
+
+const char* operationName(xmjd::Operation operation) noexcept {
+    switch (operation) {
+    case xmjd::Operation::CreateSession: return "create-session";
+    case xmjd::Operation::ProcessKey: return "process-key";
+    default: return "other";
+    }
+}
+
+void logInputResponse(HANDLE pipe, const xmjd::win::VerifiedClient& client,
+                      const xmjd::Request& request, const xmjd::Response& response) noexcept {
+    if (request.operation != xmjd::Operation::CreateSession && request.operation != xmjd::Operation::ProcessKey) return;
+    ULONG clientId = 0;
+    if (!GetNamedPipeClientProcessId(pipe, &clientId)) clientId = 0;
+    char line[320]{};
+    std::snprintf(line, sizeof(line),
+                  "XMJDHost IPC pid=%lu appcontainer=%u op=%s seq=%llu status=%s handled=%u commit=%zuB preedit=%zuB input=%zuB ascii=%u\n",
+                  static_cast<unsigned long>(clientId), client.appContainer ? 1u : 0u,
+                  operationName(request.operation), static_cast<unsigned long long>(request.id.sequence),
+                  xmjd::statusName(response.status), response.handled ? 1u : 0u,
+                  response.snapshot.commitText.size(), response.snapshot.preedit.size(),
+                  response.snapshot.rawInput.size(), response.snapshot.asciiMode ? 1u : 0u);
+    OutputDebugStringA(line);
+}
+
+void allowWindowsShellToVerifyHost() noexcept {
+    // Only the built-in shell packages can query the Host. They still pass
+    // the same user, logon, session and image-path checks as desktop TIPs.
+    constexpr const wchar_t* shellPackages[] = {
+        L"MicrosoftWindows.Client.CBS_cw5n1h2txyewy",
+        L"Microsoft.Windows.Search_cw5n1h2txyewy",
+        L"Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy",
+    };
+    for (const auto* package : shellPackages) {
+        PSID sid = nullptr;
+        const HRESULT hr = DeriveAppContainerSidFromAppContainerName(package, &sid);
+        if (FAILED(hr)) {
+            std::cerr << "shell-package-sid-error " << std::hex << hr << std::dec << '\n';
+            continue;
+        }
+        const DWORD error = xmjd::win::allowPipeServerIdentityQuery(sid);
+        FreeSid(sid);
+        if (error != ERROR_SUCCESS) std::cerr << "shell-peer-query-error " << error << '\n';
+    }
+}
 
 // 登录项启动时系统会为控制台程序新建一个窗口并一直挂着。只有本进程独占
 // 控制台（没有 cmd/PowerShell 同时附着）时才隐藏，避免把用户自己在终端里
@@ -236,6 +278,7 @@ struct ServerState {
     std::atomic<std::size_t> workerCount{0};
     std::mutex engineGate;
     std::mutex pipesMutex;
+    std::atomic<std::uint64_t> deploymentEpoch{0};
     std::array<HANDLE, kMaxConnections> activePipes{};
     xmjd::Engine& engine;
     std::function<bool(int&)> deploy;
@@ -257,10 +300,13 @@ struct ServerState {
     // Deployment destroys every engine session. Reset input connections so the
     // TIPs recreate sessions against the newly active scheme instead of
     // retaining dead engine IDs.
-    void cancelPipesExcept(HANDLE current) {
+    void resetInputConnections(std::size_t controlWorker) {
         std::lock_guard<std::mutex> lock(pipesMutex);
+        // Do not let another deployment cancel this worker's final reply.
+        activePipes[controlWorker] = INVALID_HANDLE_VALUE;
+        deploymentEpoch.fetch_add(1, std::memory_order_acq_rel);
         for (HANDLE pipe : activePipes) {
-            if (pipe != INVALID_HANDLE_VALUE && pipe != current) CancelIoEx(pipe, nullptr);
+            if (pipe != INVALID_HANDLE_VALUE) CancelIoEx(pipe, nullptr);
         }
     }
 };
@@ -278,33 +324,43 @@ void connectionWorker(ServerState& state, std::size_t workerIndex) noexcept {
     try {
         pipe.reset(workerIndex == 0 ? state.firstPipe : xmjd::win::createServerPipe(false));
         while (pipe && WaitForSingleObject(state.stopEvent, 0) != WAIT_OBJECT_0) {
+            const std::uint64_t connectionDeploymentEpoch = state.deploymentEpoch.load(std::memory_order_acquire);
             state.setPipe(workerIndex, pipe.get());
             const bool connected = xmjd::win::connectServerPipe(pipe.get(), state.stopEvent);
-            if (connected) {
+            if (connected && connectionDeploymentEpoch == state.deploymentEpoch.load(std::memory_order_acquire)) {
                 broker = std::make_unique<xmjd::BrokerConnection>(state.engine);
                 bool firstFrame = true;
                 for (;;) {
-                    if (WaitForSingleObject(state.stopEvent, 0) == WAIT_OBJECT_0) break;
+                    if (WaitForSingleObject(state.stopEvent, 0) == WAIT_OBJECT_0 ||
+                        connectionDeploymentEpoch != state.deploymentEpoch.load(std::memory_order_acquire)) break;
                     // Reclaim uninitialized clients without expiring an ordinary
                     // established input session while the user is not typing.
                     auto frame = xmjd::win::readFrame(pipe.get(), firstFrame ? 5000 : INFINITE, state.stopEvent);
-                    if (!frame || !xmjd::win::verifyClient(pipe.get())) break;
+                    if (!frame || connectionDeploymentEpoch != state.deploymentEpoch.load(std::memory_order_acquire)) break;
+                    const auto verifiedClient = xmjd::win::verifyClient(pipe.get());
+                    if (!verifiedClient) break;
                     firstFrame = false;
                     auto request = xmjd::decodeRequest(*frame);
                     if (!request) break;
 
                     xmjd::Response response;
-                    bool resetInputConnections = false;
+                    bool finalControlReply = false;
                     bool shutdownRequested = false;
                     {
                         std::unique_lock<std::mutex> gate(state.engineGate, std::try_to_lock);
-                        if (gate.owns_lock() && request->operation == xmjd::Operation::Deploy) {
+                        if (connectionDeploymentEpoch != state.deploymentEpoch.load(std::memory_order_acquire)) {
+                            response.id = request->id;
+                            response.id.version = xmjd::kProtocolVersion;
+                            response.status = xmjd::Status::Stale;
+                        } else if (gate.owns_lock() && request->operation == xmjd::Operation::Deploy) {
                             response.id = request->id;
                             response.id.version = xmjd::kProtocolVersion;
                             if (request->id.version != xmjd::kProtocolVersion) {
                                 response.status = xmjd::Status::UnsupportedVersion;
                             } else if (request->id.connectionEpoch == 0 || request->id.sessionId != 0 ||
                                        request->id.contextEpoch != 0) {
+                                response.status = xmjd::Status::InvalidRequest;
+                            } else if (verifiedClient->appContainer) {
                                 response.status = xmjd::Status::InvalidRequest;
                             } else if (!state.deploy) {
                                 response.status = xmjd::Status::Unavailable;
@@ -313,22 +369,26 @@ void connectionWorker(ServerState& state, std::size_t workerIndex) noexcept {
                                 const bool deployed = state.deploy(deployError);
                                 response.status = deployed ? xmjd::Status::Ok : xmjd::Status::EngineFailure;
                                 response.handled = deployed;
-                                // Control-only diagnostic channel; the TIP never sends Deploy.
-                                response.snapshot.page = static_cast<std::uint32_t>(deployError);
-                                resetInputConnections = deployed;
+                                response.diagnosticCode = static_cast<std::uint32_t>(deployError);
+                                // Rime invalidates sessions before attempting the deploy,
+                                // even if rebuilding or loading the scheme later fails.
+                                state.resetInputConnections(workerIndex);
+                                finalControlReply = true;
                             }
                         } else if (gate.owns_lock() && request->operation == xmjd::Operation::Shutdown) {
                             // 方案来源换了之后必须整个重启——Rime 的 shared_data_dir 只在
                             // initialize 时生效，就地重新部署不会换目录。
                             response.id = request->id;
                             response.id.version = xmjd::kProtocolVersion;
-                            if (request->id.version != xmjd::kProtocolVersion ||
+                            if (verifiedClient->appContainer || request->id.version != xmjd::kProtocolVersion ||
                                 request->id.connectionEpoch == 0 || request->id.sessionId != 0 ||
                                 request->id.contextEpoch != 0) {
                                 response.status = xmjd::Status::InvalidRequest;
                             } else {
                                 response.status = xmjd::Status::Ok;
                                 response.handled = true;
+                                state.setPipe(workerIndex, INVALID_HANDLE_VALUE);
+                                finalControlReply = true;
                                 shutdownRequested = true;
                             }
                         } else if (gate.owns_lock()) {
@@ -339,14 +399,29 @@ void connectionWorker(ServerState& state, std::size_t workerIndex) noexcept {
                             response.status = xmjd::Status::Busy;
                         }
                     }
-                    if (resetInputConnections) state.cancelPipesExcept(pipe.get());
+                    if (request->wantsAppearance && response.status == xmjd::Status::Ok &&
+                        response.handled && response.id.sessionId != 0) {
+                        // AppContainer TIPs cannot see the normal user's active.json.
+                        // Publish only the validated skin, over the authenticated session.
+                        try {
+                            auto json = xmjd::serializeCandidateStyle(
+                                xmjd::loadActiveCandidateStyle(xmjd::win::dataRoot()), false);
+                            if (!json.empty() && json.size() <= xmjd::kMaxCandidateAppearanceBytes) {
+                                response.appearance = xmjd::Response::CandidateAppearance{
+                                    std::move(json), xmjd::windowsCandidateDarkMode()};
+                            }
+                        } catch (...) {
+                            // Appearance is optional; failure must not reject a valid session.
+                        }
+                    }
+                    logInputResponse(pipe.get(), *verifiedClient, *request, response);
                     const std::string encoded = xmjd::encodeResponse(response);
-                    if (!xmjd::win::writeFrame(pipe.get(), encoded, xmjd::kInputDeadlineMs)) break;
-                    if (shutdownRequested) {
-                        SetEvent(state.stopEvent);
+                    if (finalControlReply) {
+                        const bool sent = xmjd::win::writeFinalControlFrame(pipe.get(), encoded, state.stopEvent);
+                        if (sent && shutdownRequested) SetEvent(state.stopEvent);
                         break;
                     }
-                    if (resetInputConnections) break;
+                    if (!xmjd::win::writeFrame(pipe.get(), encoded, xmjd::kInputDeadlineMs)) break;
                 }
                 std::lock_guard<std::mutex> gate(state.engineGate);
                 broker.reset();
@@ -459,210 +534,6 @@ int probeKeys(const wchar_t* keys) {
 }
 } // namespace
 
-// MARK: - 托盘图标
-//
-// 输入法图标归 Windows 的输入指示器管，右键它只会弹系统的菜单，我们的 TSF
-// 组件插不进去。所以由 Host 自己挂一个通知区图标，右键就能进设置——这也是
-// 搜狗/QQ 输入法在 Windows 上的通行做法。
-
-constexpr UINT kTrayCallbackMessage = WM_APP + 1;
-constexpr UINT kTrayMenuSettings = 1;
-constexpr UINT kTrayMenuUserData = 2;
-constexpr UINT kTrayMenuLogs = 3;
-constexpr UINT kTrayMenuQuit = 4;
-constexpr wchar_t kTrayWindowClass[] = L"XMJDHostTray";
-constexpr UINT_PTR kTrayModeTimer = 1;
-
-NOTIFYICONDATAW g_trayIcon{};
-HWND g_trayWindow = nullptr;
-HICON g_ownedModeIcon = nullptr;
-int g_modeState = -1;   // -1 未知，0 英文，1 中文
-ULONG_PTR g_gdiplusToken = 0;
-
-// 托盘图标的 中/英 两态是运行时画出来的：32px 圆底 + 一个汉字。
-HICON makeModeIcon(const wchar_t* glyph, COLORREF background) {
-    if (g_gdiplusToken == 0) {
-        Gdiplus::GdiplusStartupInput input;
-        if (Gdiplus::GdiplusStartup(&g_gdiplusToken, &input, nullptr) != Gdiplus::Ok) return nullptr;
-    }
-    const int size = 32;
-    Gdiplus::Bitmap bitmap(size, size, PixelFormat32bppARGB);
-    {
-        Gdiplus::Graphics graphics(&bitmap);
-        graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
-        graphics.Clear(Gdiplus::Color(0, 0, 0, 0));
-        Gdiplus::SolidBrush circle(Gdiplus::Color(255, GetRValue(background), GetGValue(background),
-                                                 GetBValue(background)));
-        graphics.FillEllipse(&circle, 1, 1, size - 2, size - 2);
-        Gdiplus::Font font(L"Microsoft YaHei UI", 17, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-        Gdiplus::SolidBrush text(Gdiplus::Color(255, 255, 255, 255));
-        Gdiplus::StringFormat format;
-        format.SetAlignment(Gdiplus::StringAlignmentCenter);
-        format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-        graphics.DrawString(glyph, -1, &font, Gdiplus::RectF(0, -1, static_cast<Gdiplus::REAL>(size),
-                                                              static_cast<Gdiplus::REAL>(size)),
-                            &format, &text);
-    }
-    HICON icon = nullptr;
-    bitmap.GetHICON(&icon);
-    return icon;
-}
-
-void refreshTrayModeIcon() {
-    if (!g_trayWindow) return;
-    int state = -1;
-    const auto root = xmjd::win::dataRoot();
-    if (!root.empty()) {
-        std::ifstream stream(root / L"UserData" / L"ime-mode", std::ios::binary);
-        std::string value;
-        if (stream && std::getline(stream, value)) {
-            if (value == "en") state = 0;
-            else if (value == "cn") state = 1;
-        }
-    }
-    if (state == g_modeState) return;
-    g_modeState = state;
-    HICON icon = nullptr;
-    const wchar_t* tip = L"星猫键道 · 右键打开设置";
-    if (state == 1) {
-        icon = makeModeIcon(L"中", RGB(0xFF, 0x6B, 0x35));
-        tip = L"星猫键道 · 中文";
-    } else if (state == 0) {
-        icon = makeModeIcon(L"英", RGB(0x4A, 0x55, 0x68));
-        tip = L"星猫键道 · 英文";
-    } else {
-        icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
-    }
-    if (!icon) return;
-    if (g_ownedModeIcon && g_ownedModeIcon != icon) DestroyIcon(g_ownedModeIcon);
-    g_ownedModeIcon = state >= 0 ? icon : nullptr;   // 模块图标不归我们释放
-    g_trayIcon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    g_trayIcon.hIcon = icon;
-    wcscpy_s(g_trayIcon.szTip, tip);
-    Shell_NotifyIconW(NIM_MODIFY, &g_trayIcon);
-}
-
-std::filesystem::path installDirectory() {
-    const auto module = xmjd::win::modulePath();
-    return module.empty() ? std::filesystem::path{} : module.parent_path();
-}
-
-void openSettingsWindow() {
-    const auto settings = installDirectory() / L"XMJDSettings.exe";
-    std::error_code ec;
-    if (std::filesystem::is_regular_file(settings, ec)) {
-        ShellExecuteW(nullptr, L"open", settings.c_str(), nullptr, installDirectory().c_str(), SW_SHOWNORMAL);
-        return;
-    }
-    const auto root = xmjd::win::dataRoot();
-    if (!root.empty()) ShellExecuteW(nullptr, L"open", root.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-}
-
-void openDataFolder(const wchar_t* relative) {
-    auto path = xmjd::win::dataRoot();
-    if (path.empty()) return;
-    if (relative) path /= relative;
-    std::error_code ec;
-    std::filesystem::create_directories(path, ec);
-    ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-}
-
-void showTrayMenu(HWND window) {
-    HMENU menu = CreatePopupMenu();
-    if (!menu) return;
-    AppendMenuW(menu, MF_STRING, kTrayMenuSettings, L"星猫键道设置…");
-    AppendMenuW(menu, MF_STRING, kTrayMenuUserData, L"打开用户目录");
-    AppendMenuW(menu, MF_STRING, kTrayMenuLogs, L"打开日志");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kTrayMenuQuit, L"退出引擎");
-    POINT cursor{};
-    GetCursorPos(&cursor);
-    // 不置前的话，点菜单外面菜单不会自动收起。
-    SetForegroundWindow(window);
-    const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, window, nullptr);
-    DestroyMenu(menu);
-    switch (command) {
-    case kTrayMenuSettings: openSettingsWindow(); break;
-    case kTrayMenuUserData: openDataFolder(nullptr); break;
-    case kTrayMenuLogs: openDataFolder(L"Logs"); break;
-    case kTrayMenuQuit:
-        if (const HANDLE stop = g_stopEvent.load()) SetEvent(stop);
-        break;
-    default: break;
-    }
-}
-
-LRESULT CALLBACK trayWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    static const UINT taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
-    if (message == kTrayCallbackMessage) {
-        switch (LOWORD(lParam)) {
-        case WM_RBUTTONUP:
-        case WM_CONTEXTMENU:
-            showTrayMenu(window);
-            return 0;
-        case WM_LBUTTONDBLCLK:
-            openSettingsWindow();
-            return 0;
-        default:
-            return 0;
-        }
-    }
-    if (message == WM_TIMER && wParam == kTrayModeTimer) {
-        refreshTrayModeIcon();
-        return 0;
-    }
-    if (message == taskbarCreated && taskbarCreated != 0) {
-        // 资源管理器重启后图标会消失，收到广播就重新挂上。
-        if (g_trayIcon.cbSize != 0) Shell_NotifyIconW(NIM_ADD, &g_trayIcon);
-        return 0;
-    }
-    return DefWindowProcW(window, message, wParam, lParam);
-}
-
-bool addTrayIcon(HWND window) {
-    WNDCLASSEXW cls{sizeof(cls)};
-    cls.lpfnWndProc = trayWndProc;
-    cls.hInstance = GetModuleHandleW(nullptr);
-    cls.lpszClassName = kTrayWindowClass;
-    if (!RegisterClassExW(&cls) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
-    // 必须是普通顶层窗口：message-only 窗口收不到 TaskbarCreated 广播，
-    // SetForegroundWindow 也会失败（菜单点外面不会收起）。
-    g_trayWindow = CreateWindowExW(0, kTrayWindowClass, L"XMJD", WS_POPUP, 0, 0, 0, 0,
-                                   nullptr, nullptr, cls.hInstance, nullptr);
-    if (!g_trayWindow) return false;
-    g_trayIcon = {};
-    g_trayIcon.cbSize = sizeof(g_trayIcon);
-    g_trayIcon.hWnd = g_trayWindow;
-    g_trayIcon.uID = 1;
-    g_trayIcon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    g_trayIcon.uCallbackMessage = kTrayCallbackMessage;
-    g_trayIcon.hIcon = LoadIconW(cls.hInstance, MAKEINTRESOURCEW(1));
-    if (!g_trayIcon.hIcon) g_trayIcon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wcscpy_s(g_trayIcon.szTip, L"星猫键道 · 右键打开设置");
-    if (!Shell_NotifyIconW(NIM_ADD, &g_trayIcon)) return false;
-    refreshTrayModeIcon();
-    // 中英状态由 Tip 写进 UserData\ime-mode，这里轻量轮询即可（700ms，一次文件读）。
-    SetTimer(g_trayWindow, kTrayModeTimer, 700, nullptr);
-    return true;
-}
-
-void removeTrayIcon() {
-    if (g_trayWindow) KillTimer(g_trayWindow, kTrayModeTimer);
-    if (g_ownedModeIcon) {
-        DestroyIcon(g_ownedModeIcon);
-        g_ownedModeIcon = nullptr;
-    }
-    if (g_trayIcon.cbSize != 0) {
-        Shell_NotifyIconW(NIM_DELETE, &g_trayIcon);
-        g_trayIcon.cbSize = 0;
-    }
-    if (g_trayWindow) {
-        DestroyWindow(g_trayWindow);
-        g_trayWindow = nullptr;
-    }
-}
-
 int runHost(int argc, wchar_t** argv) {
     if (argc == 3 && std::wstring_view(argv[1]) == L"--probe") {
         return probeKeys(argv[2]);
@@ -704,7 +575,7 @@ int runHost(int argc, wchar_t** argv) {
         return kExitDataLock;
     }
 
-    xmjd::win::RimeRuntime runtime(executableDirectory);
+    xmjd::win::RimeRuntime runtime(executableDirectory, root);
     int runtimeError = 0;
     if (!runtime.initialize(deploy, runtimeError)) {
         std::cerr << "runtime-error " << runtimeError << '\n';
@@ -728,6 +599,7 @@ int runHost(int argc, wchar_t** argv) {
         return kExitPipe;
     }
 
+    allowWindowsShellToVerifyHost();
     UniqueHandle firstPipe(xmjd::win::createServerPipe(true));
     if (!firstPipe) {
         SetConsoleCtrlHandler(controlHandler, FALSE);
@@ -768,26 +640,7 @@ int runHost(int argc, wchar_t** argv) {
     if (state.workerCount.fetch_sub(1) == 1) SetEvent(workersDoneEvent.get());
 
     HANDLE waits[2] = {stopEvent.get(), workersDoneEvent.get()};
-    const bool tray = addTrayIcon(nullptr);
-    bool stopped = false;
-    while (!stopped) {
-        // 主线程兼作托盘窗口的消息泵：等事件的同时处理图标菜单。
-        const DWORD wait = MsgWaitForMultipleObjects(2, waits, FALSE, INFINITE, QS_ALLINPUT);
-        if (wait == WAIT_OBJECT_0 || wait == WAIT_OBJECT_0 + 1) {
-            stopped = true;
-            break;
-        }
-        if (wait == WAIT_OBJECT_0 + 2) {
-            MSG message{};
-            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-            continue;
-        }
-        stopped = true;
-    }
-    if (tray) removeTrayIcon();
+    WaitForMultipleObjects(2, waits, FALSE, INFINITE);
     SetEvent(stopEvent.get());
     state.cancelPipes();
     for (auto& worker : workers) if (worker.joinable()) worker.join();

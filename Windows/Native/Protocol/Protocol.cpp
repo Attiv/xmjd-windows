@@ -22,6 +22,7 @@ const char* operationName(Operation operation) noexcept {
     case Operation::Cancel: return "cancel";
     case Operation::DestroySession: return "destroySession";
     case Operation::Deploy: return "deploy";
+    case Operation::Shutdown: return "shutdown";
     }
     return nullptr;
 }
@@ -35,6 +36,7 @@ std::optional<Operation> parseOperation(std::string_view name) noexcept {
     if (name == "cancel") return Operation::Cancel;
     if (name == "destroySession") return Operation::DestroySession;
     if (name == "deploy") return Operation::Deploy;
+    if (name == "shutdown") return Operation::Shutdown;
     return std::nullopt;
 }
 
@@ -327,6 +329,8 @@ struct RequestPayload {
     bool hasCandidateIndex = false;
     bool hasSnapshotRevision = false;
     bool hasConvert = false;
+    bool wantsAppearance = false;
+    bool hasWantsAppearance = false;
 };
 
 bool parseRequestPayload(Parser& parser, RequestPayload& payload) {
@@ -367,6 +371,9 @@ bool parseRequestPayload(Parser& parser, RequestPayload& payload) {
                 if ((seen & (1u << 4)) != 0 || !parser.boolean(payload.convert)) return false;
                 payload.hasConvert = true;
                 seen |= 1u << 4;
+            } else if (key == "wantsAppearance") {
+                if (payload.hasWantsAppearance || !parser.boolean(payload.wantsAppearance)) return false;
+                payload.hasWantsAppearance = true;
             } else {
                 return false;
             }
@@ -379,6 +386,7 @@ bool parseRequestPayload(Parser& parser, RequestPayload& payload) {
 }
 
 bool validateRequestPayload(Operation operation, const RequestPayload& payload) {
+    if (payload.hasWantsAppearance && operation != Operation::CreateSession) return false;
     switch (operation) {
     case Operation::ProcessKey:
         return payload.hasKeycode && payload.hasModifiers && !payload.hasCandidateIndex && !payload.hasSnapshotRevision && !payload.hasConvert;
@@ -392,7 +400,9 @@ bool validateRequestPayload(Operation operation, const RequestPayload& payload) 
     case Operation::Cancel:
     case Operation::DestroySession:
     case Operation::Deploy:
-        return !payload.hasKeycode && !payload.hasModifiers && !payload.hasCandidateIndex && !payload.hasSnapshotRevision && !payload.hasConvert;
+    case Operation::Shutdown:
+        return !payload.hasKeycode && !payload.hasModifiers && !payload.hasCandidateIndex &&
+               !payload.hasSnapshotRevision && !payload.hasConvert;
     }
     return false;
 }
@@ -501,6 +511,7 @@ bool parseSnapshot(Parser& parser, Snapshot& snapshot) {
 bool validRequestForEncoding(const Request& request) noexcept {
     if (request.id.version != kProtocolVersion || !safeInteger(request.id.connectionEpoch) || !safeInteger(request.id.sessionId) ||
         !safeInteger(request.id.contextEpoch) || !safeInteger(request.id.sequence) || operationName(request.operation) == nullptr) return false;
+    if (request.wantsAppearance && request.operation != Operation::CreateSession) return false;
     switch (request.operation) {
     case Operation::ProcessKey:
         return true;
@@ -512,6 +523,7 @@ bool validRequestForEncoding(const Request& request) noexcept {
     case Operation::Cancel:
     case Operation::DestroySession:
     case Operation::Deploy:
+    case Operation::Shutdown:
         return true;
     }
     return false;
@@ -700,11 +712,14 @@ std::string encodeRequest(const Request& request) {
     case Operation::Finalize:
         comma(); output += "\"convert\":"; output += request.convert ? "true" : "false";
         break;
-    case Operation::Health:
     case Operation::CreateSession:
+        if (request.wantsAppearance) { comma(); output += "\"wantsAppearance\":true"; }
+        break;
+    case Operation::Health:
     case Operation::Cancel:
     case Operation::DestroySession:
     case Operation::Deploy:
+    case Operation::Shutdown:
         break;
     }
     output += "}}";
@@ -716,6 +731,9 @@ std::string encodeResponse(const Response& response) {
     if (response.id.version != kProtocolVersion || !safeInteger(response.id.connectionEpoch) || !safeInteger(response.id.sessionId) ||
         !safeInteger(response.id.contextEpoch) || !safeInteger(response.id.sequence) || statusName(response.status) == nullptr ||
         (response.status != Status::Ok && response.handled) || !validSnapshotForEncoding(response.snapshot)) return {};
+    if (response.appearance && (!response.handled || response.id.sessionId == 0 ||
+        response.appearance->json.empty() || response.appearance->json.size() > kMaxCandidateAppearanceBytes ||
+        !textForWire(response.appearance->json))) return {};
     std::string output;
     output.reserve(512);
     output.push_back('{');
@@ -724,8 +742,18 @@ std::string encodeResponse(const Response& response) {
     appendJsonString(output, statusName(response.status));
     output += ",\"handled\":";
     output += response.handled ? "true" : "false";
+    if (response.diagnosticCode != 0) {
+        output += ",\"diagnosticCode\":";
+        appendNumber(output, response.diagnosticCode);
+    }
     output.push_back(',');
     appendSnapshot(output, response.snapshot);
+    if (response.appearance) {
+        output += ",\"candidateStyle\":";
+        appendJsonString(output, response.appearance->json);
+        output += ",\"candidateDark\":";
+        output += response.appearance->dark ? "true" : "false";
+    }
     output.push_back('}');
     if (output.size() > kMaxFrameBytes) return {};
     return output;
@@ -771,6 +799,7 @@ std::optional<Request> decodeRequest(std::string_view json) noexcept {
         request.candidateIndex = payload.candidateIndex;
         request.snapshotRevision = payload.snapshotRevision;
         request.convert = payload.convert;
+        request.wantsAppearance = payload.wantsAppearance;
         return request;
     } catch (...) {
         return std::nullopt;
@@ -783,6 +812,7 @@ std::optional<Response> decodeResponse(std::string_view json) noexcept {
         Parser parser(json);
         if (!parser.objectStart()) return std::nullopt;
         Response response;
+        Response::CandidateAppearance appearance;
         unsigned seen = 0;
         std::string status;
         bool ended = false;
@@ -796,13 +826,26 @@ std::optional<Response> decodeResponse(std::string_view json) noexcept {
                 } else if (key == "status") {
                     if ((seen & (1u << 5)) != 0 || !parser.string(status, 32)) return std::nullopt;
                     seen |= 1u << 5;
-                } else if (key == "handled") {
-                    if ((seen & (1u << 6)) != 0 || !parser.boolean(response.handled)) return std::nullopt;
-                    seen |= 1u << 6;
-                } else if (key == "snapshot") {
-                    if ((seen & (1u << 7)) != 0 || !parseSnapshot(parser, response.snapshot)) return std::nullopt;
-                    seen |= 1u << 7;
-                } else {
+            } else if (key == "handled") {
+                if ((seen & (1u << 6)) != 0 || !parser.boolean(response.handled)) return std::nullopt;
+                seen |= 1u << 6;
+            } else if (key == "diagnosticCode") {
+                std::uint64_t value = 0;
+                if ((seen & (1u << 7)) != 0 || !parser.unsignedInteger(value) ||
+                    value > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
+                response.diagnosticCode = static_cast<std::uint32_t>(value);
+                seen |= 1u << 7;
+            } else if (key == "snapshot") {
+                if ((seen & (1u << 8)) != 0 || !parseSnapshot(parser, response.snapshot)) return std::nullopt;
+                seen |= 1u << 8;
+            } else if (key == "candidateStyle") {
+                if ((seen & (1u << 9)) != 0 || !parser.string(appearance.json, kMaxCandidateAppearanceBytes) ||
+                    appearance.json.empty() || !textForWire(appearance.json)) return std::nullopt;
+                seen |= 1u << 9;
+            } else if (key == "candidateDark") {
+                if ((seen & (1u << 10)) != 0 || !parser.boolean(appearance.dark)) return std::nullopt;
+                seen |= 1u << 10;
+            } else {
                     return std::nullopt;
                 }
                 if (!parser.objectEnd(ended)) return std::nullopt;
@@ -810,10 +853,15 @@ std::optional<Response> decodeResponse(std::string_view json) noexcept {
                 if (!parser.comma()) return std::nullopt;
             }
         }
-        if (!parser.end() || seen != 0xffu) return std::nullopt;
+        if (!parser.end() || (seen & 0x17fu) != 0x17fu) return std::nullopt;
         const auto parsedStatus = parseStatus(status);
         if (!parsedStatus || response.id.version != kProtocolVersion || (*parsedStatus != Status::Ok && response.handled) ||
             !validSnapshotForEncoding(response.snapshot)) return std::nullopt;
+        constexpr unsigned appearanceFields = (1u << 9) | (1u << 10);
+        if ((seen & appearanceFields) != 0) {
+            if ((seen & appearanceFields) != appearanceFields || !response.handled || response.id.sessionId == 0) return std::nullopt;
+            response.appearance = std::move(appearance);
+        }
         response.status = *parsedStatus;
         return response;
     } catch (...) {

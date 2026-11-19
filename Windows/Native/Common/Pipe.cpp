@@ -5,9 +5,11 @@
 #endif
 #include "Pipe.h"
 
+#include <aclapi.h>
 #include <sddl.h>
 #include <shlobj.h>
 #include <algorithm>
+#include <cstring>
 #include <cwctype>
 #include <exception>
 #include <limits>
@@ -21,7 +23,9 @@ namespace xmjd::win {
 namespace {
 constexpr wchar_t kPipePrefix[] = L"\\\\.\\pipe\\XMJD\\";
 constexpr wchar_t kPipeSuffix[] = L"\\broker-v1";
-constexpr DWORD kPipeAccess = GENERIC_READ | GENERIC_WRITE;
+// GENERIC_WRITE includes FILE_CREATE_PIPE_INSTANCE for named pipes. Clients
+// need data/attribute I/O, not the right to create another server instance.
+constexpr DWORD kPipeAccess = (FILE_GENERIC_READ | FILE_GENERIC_WRITE) & ~FILE_CREATE_PIPE_INSTANCE;
 constexpr std::uint64_t kJsonSafeInteger = 9007199254740991ULL;
 
 struct TokenDetails {
@@ -119,14 +123,14 @@ PSID sidPointer(const std::vector<std::uint8_t>& bytes) noexcept {
 }
 
 bool sameTokenBoundary(const TokenDetails& left, const TokenDetails& right) {
-    // 受限令牌一律拒绝；会话、用户、登录 SID 必须一致。
+    // Preserve the restricted-token boundary. TokenIsAppContainer is queried
+    // separately; AppContainer and IsTokenRestricted are not equivalent.
     if (left.restricted || right.restricted) return false;
     if (left.session != right.session) return false;
     if (!EqualSid(sidPointer(left.user), sidPointer(right.user))) return false;
     if (!EqualSid(sidPointer(left.logon), sidPointer(right.logon))) return false;
-    // 打包应用（SearchHost、设置、商店应用）跑在 AppContainer 里，完整性级别天生低于
-    // 桌面进程，拿不到 Medium。这类客户端只能靠"同一用户 + 同一登录会话"来界定，
-    // 否则系统搜索框、WinUI 应用里根本无法使用本输入法。
+    // AppContainer clients can run at Low IL. Require the same user and logon
+    // session above, but do not require their IL to equal the desktop Host's.
     if (left.appContainer || right.appContainer) return true;
     return left.integrity >= SECURITY_MANDATORY_MEDIUM_RID &&
            right.integrity >= SECURITY_MANDATORY_MEDIUM_RID &&
@@ -144,39 +148,27 @@ std::wstring currentLogonSidString() {
     return result;
 }
 
-bool makeSecurityAttributes(SECURITY_ATTRIBUTES& attributes, PSECURITY_DESCRIPTOR& descriptor, PACL& acl, std::vector<std::uint8_t>& sidStorage) {
+bool makeSecurityAttributes(SECURITY_ATTRIBUTES& attributes, PSECURITY_DESCRIPTOR& descriptor) {
     TokenDetails details;
     if (!currentTokenDetails(details)) return false;
     if (details.restricted || details.appContainer || details.integrity < SECURITY_MANDATORY_MEDIUM_RID) return false;
-    sidStorage = details.logon;
-    // 同一个 DACL 里再放一条 ALL APPLICATION PACKAGES：打包应用（系统搜索、设置、
-    // 商店应用）属于 AppContainer，只有登录 SID 的 ACE 它们打不开管道。
-    std::vector<std::uint8_t> packageStorage(SECURITY_MAX_SID_SIZE);
-    DWORD packageBytes = static_cast<DWORD>(packageStorage.size());
-    if (!CreateWellKnownSid(WinBuiltinAnyPackageSid, nullptr, packageStorage.data(), &packageBytes)) return false;
-    const PSID logonSid = reinterpret_cast<PSID>(sidStorage.data());
-    const PSID packageSid = reinterpret_cast<PSID>(packageStorage.data());
-    const DWORD access = kPipeAccess | FILE_GENERIC_READ | FILE_GENERIC_WRITE;
-    const DWORD aclBytes = sizeof(ACL) +
-        2 * (sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD)) +
-        GetLengthSid(logonSid) + GetLengthSid(packageSid);
-    acl = reinterpret_cast<PACL>(LocalAlloc(LPTR, aclBytes));
-    descriptor = reinterpret_cast<PSECURITY_DESCRIPTOR>(LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH));
-    if (!acl || !descriptor) return false;
-    if (!InitializeAcl(acl, aclBytes, ACL_REVISION) ||
-        !AddAccessAllowedAce(acl, ACL_REVISION, access, logonSid) ||
-        !AddAccessAllowedAce(acl, ACL_REVISION, access, packageSid) ||
-        !InitializeSecurityDescriptor(descriptor, SECURITY_DESCRIPTOR_REVISION) ||
-        !SetSecurityDescriptorDacl(descriptor, TRUE, acl, FALSE)) return false;
+    LPWSTR rawSid = nullptr;
+    if (!ConvertSidToStringSidW(sidPointer(details.logon), &rawSid)) return false;
+    const std::wstring logonSid(rawSid);
+    LocalFree(rawSid);
+    // The Host's logon SID can create server instances. Packages get only client
+    // I/O; verifyClient still requires the same user, session and logon SID.
+    // OWNER RIGHTS prevents the implicit owner WRITE_DAC grant. Low integrity
+    // is needed in addition to the package DACL: DACL access cannot bypass MIC.
+    wchar_t clientRights[16]{};
+    swprintf_s(clientRights, L"0x%08lX", static_cast<unsigned long>(kPipeAccess));
+    const std::wstring sddl = L"D:P(A;;GRGW;;;" + logonSid + L")"
+        L"(A;;" + clientRights + L";;;AC)(A;;RC;;;OW)S:(ML;;NW;;;LW)";
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr)) return false;
     attributes.nLength = sizeof(attributes);
     attributes.lpSecurityDescriptor = descriptor;
     attributes.bInheritHandle = FALSE;
     return true;
-}
-
-void freeSecurityAttributes(PSECURITY_DESCRIPTOR descriptor, PACL acl) {
-    if (descriptor) LocalFree(descriptor);
-    if (acl) LocalFree(acl);
 }
 
 std::wstring fullPath(std::wstring path) {
@@ -193,13 +185,11 @@ std::wstring fullPath(std::wstring path) {
     return result;
 }
 
-std::wstring processImagePath(DWORD processId) {
-    HandleGuard process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId));
-    if (!process) return {};
+std::wstring processImagePath(HANDLE process) {
     std::wstring result(512, L'\0');
     for (;;) {
         DWORD length = static_cast<DWORD>(result.size());
-        if (QueryFullProcessImageNameW(process.get(), 0, result.data(), &length)) {
+        if (QueryFullProcessImageNameW(process, 0, result.data(), &length)) {
             result.resize(length);
             return fullPath(std::move(result));
         }
@@ -208,21 +198,66 @@ std::wstring processImagePath(DWORD processId) {
     }
 }
 
-bool verifyPeer(HANDLE pipe, const std::filesystem::path& expectedHost) {
+bool verifyPeer(HANDLE pipe, const std::filesystem::path& expectedHost,
+                const char*& failureStage, DWORD& failureCode) {
+    const auto fail = [&](const char* stage, DWORD code) {
+        failureStage = stage;
+        failureCode = code == ERROR_SUCCESS ? ERROR_GEN_FAILURE : code;
+        return false;
+    };
     ULONG processId = 0;
-    if (!GetNamedPipeServerProcessId(pipe, &processId) || processId == 0) return false;
+    if (!GetNamedPipeServerProcessId(pipe, &processId)) return fail("peer-server-pid", GetLastError());
+    if (processId == 0) return fail("peer-server-pid", ERROR_INVALID_DATA);
+    SetLastError(ERROR_SUCCESS);
     HandleGuard process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId));
-    if (!process) return false;
+    if (!process) return fail("peer-open-process", GetLastError());
     HandleGuard token;
     HANDLE rawToken = nullptr;
-    if (!OpenProcessToken(process.get(), TOKEN_QUERY, &rawToken)) return false;
+    SetLastError(ERROR_SUCCESS);
+    if (!OpenProcessToken(process.get(), TOKEN_QUERY, &rawToken)) return fail("peer-open-token", GetLastError());
     token.reset(rawToken);
     TokenDetails peer;
     TokenDetails current;
-    if (!readTokenDetails(token.get(), peer) || !currentTokenDetails(current) || !sameTokenBoundary(current, peer)) return false;
-    const std::wstring actual = processImagePath(processId);
+    SetLastError(ERROR_SUCCESS);
+    if (!readTokenDetails(token.get(), peer)) return fail("peer-server-token", GetLastError());
+    SetLastError(ERROR_SUCCESS);
+    if (!currentTokenDetails(current)) return fail("peer-current-token", GetLastError());
+    if (!sameTokenBoundary(current, peer)) return fail("peer-token-boundary", ERROR_ACCESS_DENIED);
+    SetLastError(ERROR_SUCCESS);
+    const std::wstring actual = processImagePath(process.get());
+    if (actual.empty()) return fail("peer-image-query", GetLastError());
     const std::wstring expected = fullPath(expectedHost.wstring());
-    return !actual.empty() && !expected.empty() && actual == expected;
+    if (expected.empty()) return fail("peer-expected-path", GetLastError());
+    if (actual != expected) return fail("peer-image-mismatch", ERROR_ACCESS_DENIED);
+    failureStage = "connected";
+    failureCode = ERROR_SUCCESS;
+    return true;
+}
+
+DWORD grantQueryAccess(HANDLE object, PSID sid, DWORD access) noexcept {
+    PACL original = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    DWORD error = GetSecurityInfo(object, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+                                  nullptr, nullptr, &original, nullptr, &descriptor);
+    if (error == ERROR_SUCCESS) {
+        if (!original) {
+            error = ERROR_INVALID_ACL;
+        } else {
+            EXPLICIT_ACCESSW entry{};
+            entry.grfAccessPermissions = access;
+            entry.grfAccessMode = GRANT_ACCESS;
+            BuildTrusteeWithSidW(&entry.Trustee, sid);
+            PACL updated = nullptr;
+            error = SetEntriesInAclW(1, &entry, original, &updated);
+            if (error == ERROR_SUCCESS) {
+                error = SetSecurityInfo(object, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+                                        nullptr, nullptr, updated, nullptr);
+            }
+            if (updated) LocalFree(updated);
+        }
+    }
+    if (descriptor) LocalFree(descriptor);
+    return error;
 }
 
 bool waitForOverlapped(HANDLE pipe, OVERLAPPED& overlapped, LocalDeadline& deadline, DWORD& transferred) {
@@ -317,6 +352,7 @@ std::uint64_t newEpoch() noexcept {
 bool responseMatches(const Request& request, const Response& response) {
     if (response.id.version != request.id.version || response.id.connectionEpoch != request.id.connectionEpoch ||
         response.id.contextEpoch != request.id.contextEpoch || response.id.sequence != request.id.sequence) return false;
+    if (response.appearance && (request.operation != Operation::CreateSession || !request.wantsAppearance)) return false;
     if (request.operation == Operation::CreateSession) {
         if (response.status == Status::Ok && response.handled) return response.id.sessionId != 0;
         return response.id.sessionId == 0;
@@ -376,28 +412,38 @@ std::string narrow(std::wstring_view utf16) {
     return result;
 }
 
-HANDLE createServerPipe(bool firstInstance) {
-    const std::wstring name = pipeName();
+HANDLE createServerPipe(bool firstInstance, const std::wstring& name) {
     if (name.empty()) return INVALID_HANDLE_VALUE;
     SECURITY_ATTRIBUTES attributes{};
     PSECURITY_DESCRIPTOR descriptor = nullptr;
-    PACL acl = nullptr;
-    std::vector<std::uint8_t> sidStorage;
-    if (!makeSecurityAttributes(attributes, descriptor, acl, sidStorage)) {
-        freeSecurityAttributes(descriptor, acl);
-        return INVALID_HANDLE_VALUE;
-    }
+    if (!makeSecurityAttributes(attributes, descriptor)) return INVALID_HANDLE_VALUE;
     const DWORD flags = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (firstInstance ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0);
     HANDLE pipe = CreateNamedPipeW(name.c_str(), flags, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                                    kMaxPipeConnections, static_cast<DWORD>(kMaxFrameBytes + 4), static_cast<DWORD>(kMaxFrameBytes + 4), 0, &attributes);
-    freeSecurityAttributes(descriptor, acl);
+    LocalFree(descriptor);
     return pipe == INVALID_HANDLE_VALUE ? INVALID_HANDLE_VALUE : pipe;
 }
 
-bool verifyClient(HANDLE pipe) {
-    if (pipe == INVALID_HANDLE_VALUE || pipe == nullptr) return false;
+DWORD allowPipeServerIdentityQuery(PSID appContainerSid) noexcept {
+    const SID_IDENTIFIER_AUTHORITY packageAuthority = SECURITY_APP_PACKAGE_AUTHORITY;
+    if (!appContainerSid || !IsValidSid(appContainerSid) ||
+        std::memcmp(GetSidIdentifierAuthority(appContainerSid), &packageAuthority, sizeof(packageAuthority)) != 0 ||
+        *GetSidSubAuthorityCount(appContainerSid) != SECURITY_APP_PACKAGE_RID_COUNT ||
+        *GetSidSubAuthority(appContainerSid, 0) != SECURITY_APP_PACKAGE_BASE_RID) return ERROR_INVALID_SID;
+
+    const HANDLE process = GetCurrentProcess();
+    HANDLE raw = nullptr;
+    if (!OpenProcessToken(process, READ_CONTROL | WRITE_DAC, &raw)) return GetLastError();
+    HandleGuard token(raw);
+    const DWORD tokenResult = grantQueryAccess(token.get(), appContainerSid, TOKEN_QUERY);
+    if (tokenResult != ERROR_SUCCESS) return tokenResult;
+    return grantQueryAccess(process, appContainerSid, PROCESS_QUERY_LIMITED_INFORMATION);
+}
+
+std::optional<VerifiedClient> verifyClient(HANDLE pipe) {
+    if (pipe == INVALID_HANDLE_VALUE || pipe == nullptr) return std::nullopt;
     TokenDetails current;
-    if (!currentTokenDetails(current) || !ImpersonateNamedPipeClient(pipe)) return false;
+    if (!currentTokenDetails(current) || !ImpersonateNamedPipeClient(pipe)) return std::nullopt;
     HANDLE rawToken = nullptr;
     const bool opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &rawToken) != FALSE;
     HandleGuard token(rawToken);
@@ -407,11 +453,12 @@ bool verifyClient(HANDLE pipe) {
         read = opened && readTokenDetails(token.get(), client);
     } catch (...) {
         if (!RevertToSelf()) std::terminate();
-        return false;
+        return std::nullopt;
     }
     // 身份验证失败不允许线程继续以客户端身份处理后续引擎操作。
     if (!RevertToSelf()) std::terminate();
-    return read && sameTokenBoundary(current, client);
+    if (!read || !sameTokenBoundary(current, client)) return std::nullopt;
+    return VerifiedClient{client.appContainer};
 }
 
 bool connectServerPipe(HANDLE pipe, HANDLE stopEvent) {
@@ -462,21 +509,51 @@ bool writeFrame(HANDLE pipe, std::string_view json, DWORD deadlineMs) {
     return writeFrameUntil(pipe, json, deadline);
 }
 
+bool writeFinalControlFrame(HANDLE pipe, std::string_view json, HANDLE stopEvent) {
+    LocalDeadline writeDeadline(kInputDeadlineMs, stopEvent);
+    if (pipe == INVALID_HANDLE_VALUE || pipe == nullptr || !writeFrameUntil(pipe, json, writeDeadline)) return false;
+    // DisconnectNamedPipe would discard the unread part of the reply. Settings
+    // closes its pipe after reading it; a bounded read observes that EOF without
+    // the indefinite wait of FlushFileBuffers. Do not accept another request.
+    constexpr DWORD kClientCloseDeadlineMs = 2000;
+    LocalDeadline closeDeadline(kClientCloseDeadlineMs, stopEvent);
+    std::uint8_t unexpectedByte = 0;
+    (void)readExactUntil(pipe, &unexpectedByte, 1, closeDeadline);
+    return true;
+}
+
 PipeClient::~PipeClient() {
     close();
 }
 
-bool PipeClient::connect(const std::filesystem::path& expectedHost) {
+bool PipeClient::connect(const std::filesystem::path& expectedHost, const std::wstring& name) {
     close();
-    const std::wstring name = pipeName();
-    if (name.empty() || expectedHost.empty() || !expectedHost.is_absolute()) return false;
+    connectFailureStage_ = "pipe-name";
+    connectFailureCode_ = ERROR_SUCCESS;
+    if (name.empty()) {
+        connectFailureCode_ = GetLastError();
+        return false;
+    }
+    connectFailureStage_ = "host-path";
+    if (expectedHost.empty() || !expectedHost.is_absolute()) {
+        connectFailureCode_ = ERROR_INVALID_PARAMETER;
+        return false;
+    }
+    connectFailureStage_ = "pipe-open";
     HANDLE raw = CreateFileW(name.c_str(), kPipeAccess, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
-    if (raw == INVALID_HANDLE_VALUE) return false;
+    if (raw == INVALID_HANDLE_VALUE) {
+        connectFailureCode_ = GetLastError();
+        return false;
+    }
     HandleGuard candidate(raw);
-    DWORD mode = PIPE_READMODE_BYTE;
-    if (!SetNamedPipeHandleState(candidate.get(), &mode, nullptr, nullptr) || !verifyPeer(candidate.get(), expectedHost)) return false;
+    connectFailureStage_ = "peer-verify";
+    if (!verifyPeer(candidate.get(), expectedHost, connectFailureStage_, connectFailureCode_)) {
+        return false;
+    }
     pipe_ = candidate.release();
     epoch_ = newEpoch();
+    connectFailureStage_ = "connected";
+    connectFailureCode_ = ERROR_SUCCESS;
     return true;
 }
 

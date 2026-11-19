@@ -16,8 +16,10 @@
 #include <vector>
 
 #include "../Common/Pipe.h"
+#include "ShiftTap.h"
 
 namespace xmjd::tip {
+enum class CandidatePresentation;
 
 class CandidateRenderer;
 
@@ -156,15 +158,17 @@ private:
     bool endComposition(EditSession* edit, TfEditCookie cookie, bool eraseText);
     bool startComposition(EditSession* edit, TfEditCookie cookie);
     void updateCandidateUi(const xmjd::Snapshot& snapshot, TfEditCookie cookie);
-    // 把中英状态写到 UserData\ime-mode，Host 据此切换托盘图标。
+    // 用引擎快照同步 TSF 语言栏状态。
     void reportImeMode(bool asciiMode);
-    // 语言栏按钮：让 Windows 把本输入法当"正规 IME"，输入指示器里也有位置。
+    // 设置入口；Windows 应用兼容性由 TSF 类别注册声明。
     void createLangBarItem();
     void destroyLangBarItem();
     void closeCandidateUi() noexcept;
     bool positionCandidateWindow(TfEditCookie cookie);
     bool showCandidateWindow(bool show);
-    bool createCandidateWindow();
+    bool ensurePopupClass();
+    bool ensureCandidateWindow(HWND viewWindow, CandidatePresentation presentation);
+    void destroyCandidateWindow() noexcept;
     void showContextMenu(HWND window);
     bool processCandidateSelection(EditSession* edit, TfEditCookie cookie);
     UINT rimeModifiers() const;
@@ -188,8 +192,6 @@ private:
     xmjd::win::PipeClient pipe_;
     TfClientId clientId_ = TF_CLIENTID_NULL;
     bool asciiMode_ = false;          // 引擎当前的英文模式
-    bool asciiModeKnown_ = false;
-    bool lastAsciiMode_ = false;
     DWORD uiElementId_ = TF_INVALID_UIELEMENTID;
     DWORD activationFlags_ = 0;
     DWORD profileSinkCookie_ = TF_INVALID_COOKIE;
@@ -200,7 +202,11 @@ private:
     std::uint64_t candidateRevision_ = 0;
     std::wstring acknowledgedRaw_;
     bool engineRetryScheduled_ = false;
+    HWND engineRetryWindow_ = nullptr;
     HWND candidateWindow_ = nullptr;
+    bool opaqueCandidatePainted_ = false;
+    bool candidateCompositionFailed_ = false;
+    bool allowCandidateAppearance_ = true;
     std::unique_ptr<CandidateRenderer> candidateRenderer_;
     bool activated_ = false;
     bool foreground_ = false;
@@ -211,6 +217,7 @@ private:
     bool compositionTerminated_ = false;
     bool contextUnavailable_ = false;
     bool capsKeyDown_ = false;
+    ShiftTap shiftTap_;
     UINT modifierKeysDown_ = 0;
     bool uiElementShow_ = false;
     bool uiElementAttempted_ = false;

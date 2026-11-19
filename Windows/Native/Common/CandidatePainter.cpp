@@ -68,20 +68,20 @@ void paintShadow(Graphics& graphics, const Rect& panel, int radius, int margin, 
     }
 }
 
-void drawText(Graphics& graphics, const std::wstring& text, const std::wstring& face, int pixelSize,
+bool drawText(Graphics& graphics, const std::wstring& text, const std::wstring& face, int pixelSize,
               const Color& color, REAL x, REAL y, REAL width, REAL height) {
-    if (text.empty()) return;
+    if (text.empty()) return false;
     FontFamily family(face.c_str());
-    if (family.GetLastStatus() != Ok) return;
+    if (family.GetLastStatus() != Ok) return false;
     Font font(&family, static_cast<REAL>(pixelSize), FontStyleRegular, UnitPixel);
-    if (font.GetLastStatus() != Ok) return;
+    if (font.GetLastStatus() != Ok) return false;
     SolidBrush brush(color);
     StringFormat format(StringFormat::GenericTypographic());
     format.SetFormatFlags(StringFormatFlagsNoWrap | StringFormatFlagsMeasureTrailingSpaces);
     format.SetLineAlignment(StringAlignmentCenter);
     format.SetTrimming(StringTrimmingEllipsisCharacter);
     RectF bounds(x, y, std::max<REAL>(1, width), height);
-    graphics.DrawString(text.c_str(), static_cast<INT>(text.size()), &font, bounds, &format, &brush);
+    return graphics.DrawString(text.c_str(), static_cast<INT>(text.size()), &font, bounds, &format, &brush) == Ok;
 }
 
 int measureText(const std::wstring& face, std::wstring_view text, int pixelSize) {
@@ -105,11 +105,19 @@ int candidateShadowMargin(int dpi) {
     return std::max(4, stylePixels(8.0, dpi <= 0 ? 96 : dpi));
 }
 
-void paintCandidateSurface(Graphics& graphics, POINT origin, const std::wstring& face,
+bool windowsCandidateDarkMode() noexcept {
+    DWORD light = 1;
+    DWORD size = sizeof(light);
+    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                        L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size) == ERROR_SUCCESS &&
+           light == 0;
+}
+
+bool paintCandidateSurface(Graphics& graphics, POINT origin, const std::wstring& face,
                            const CandidateStyle& style, const std::vector<CandidateItem>& items,
-                           const CandidateLayout& layout, unsigned selected, int dpi, bool dark) {
-    if (layout.width <= 0 || layout.height <= 0 || items.empty()) return;
-    const int margin = candidateShadowMargin(dpi);
+                           const CandidateLayout& layout, unsigned selected, int dpi, bool dark, bool withShadow) {
+    if (layout.width <= 0 || layout.height <= 0 || items.empty()) return false;
+    const int margin = withShadow ? candidateShadowMargin(dpi) : 0;
     const Rect panel(origin.x + margin, origin.y + margin, layout.width, layout.height);
     const int radius = stylePixels(style.cornerRadius, dpi);
     const int itemRadius = stylePixels(style.itemRadius, dpi);
@@ -133,6 +141,7 @@ void paintCandidateSurface(Graphics& graphics, POINT origin, const std::wstring&
         : pairColor(style.text, dark, 0.7);
     const unsigned highlighted = items.empty() ? 0 : std::min<unsigned>(selected, static_cast<unsigned>(items.size() - 1));
 
+    bool paintedCandidate = false;
     for (std::size_t index = 0; index < layout.items.size() && index < items.size(); ++index) {
         const CandidateBox& box = layout.items[index];
         const bool isSelected = index == highlighted;
@@ -157,9 +166,9 @@ void paintCandidateSurface(Graphics& graphics, POINT origin, const std::wstring&
             cursor += labelWidth + metrics.labelGap;
         }
         const int textWidth = measureText(face, items[index].text, metrics.fontSize);
-        drawText(graphics, items[index].text, face, metrics.fontSize,
-                 isSelected ? selectedText : textColor, cursor, baseline,
-                 static_cast<REAL>(textWidth), rowHeight);
+        if (drawText(graphics, items[index].text, face, metrics.fontSize,
+                     isSelected ? selectedText : textColor, cursor, baseline,
+                     static_cast<REAL>(textWidth), rowHeight)) paintedCandidate = true;
         cursor += textWidth;
         if (style.showComments && !items[index].comment.empty()) {
             cursor += metrics.commentGap;
@@ -167,6 +176,47 @@ void paintCandidateSurface(Graphics& graphics, POINT origin, const std::wstring&
                      static_cast<REAL>(panel.X + layout.width - cursor - metrics.padding), rowHeight);
         }
     }
+    return paintedCandidate && graphics.GetLastStatus() == Ok;
+}
+
+bool paintOpaqueCandidateSurface(HDC dc, const RECT& client, const std::wstring& face,
+                                 const CandidateStyle& style, const std::vector<CandidateItem>& items,
+                                 const CandidateLayout& layout, unsigned selected, int dpi) {
+    if (!dc || IsRectEmpty(&client) || items.empty() || layout.items.empty()) return false;
+    if (!FillRect(dc, &client, GetSysColorBrush(COLOR_WINDOW))) return false;
+    FrameRect(dc, &client, GetSysColorBrush(COLOR_WINDOWFRAME));
+    const auto metrics = candidateMetrics(style, dpi);
+    const int saved = SaveDC(dc);
+    if (!saved) return false;
+    HFONT font = CreateFontW(-metrics.fontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            DEFAULT_QUALITY, DEFAULT_PITCH, face.empty() ? nullptr : face.c_str());
+    SelectObject(dc, font ? static_cast<HGDIOBJ>(font) : GetStockObject(DEFAULT_GUI_FONT));
+    SetBkMode(dc, TRANSPARENT);
+    bool paintedText = false;
+    for (std::size_t i = 0; i < (std::min)(items.size(), layout.items.size()); ++i) {
+        const auto& box = layout.items[i];
+        const auto& item = items[i];
+        RECT row{box.x, box.y, box.x + box.width, box.y + box.height};
+        const bool active = i == selected;
+        if (active) FillRect(dc, &row, GetSysColorBrush(COLOR_HIGHLIGHT));
+        SetTextColor(dc, GetSysColor(active ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
+        row.left += metrics.padX;
+        row.right -= metrics.padX;
+        if (IsRectEmpty(&row)) continue;
+        std::wstring text;
+        if (style.showLabels && !item.label.empty()) text = item.label + L" ";
+        text += item.text;
+        if (style.showComments && !item.comment.empty()) text += L"  " + item.comment;
+        if (!text.empty() &&
+            DrawTextW(dc, text.data(), static_cast<int>(text.size()), &row,
+                      DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS) > 0) {
+            paintedText = true;
+        }
+    }
+    RestoreDC(dc, saved);
+    if (font) DeleteObject(font);
+    return paintedText;
 }
 
 } // namespace xmjd
