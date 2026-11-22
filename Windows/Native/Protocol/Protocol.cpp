@@ -23,6 +23,7 @@ const char* operationName(Operation operation) noexcept {
     case Operation::DestroySession: return "destroySession";
     case Operation::Deploy: return "deploy";
     case Operation::Shutdown: return "shutdown";
+    case Operation::RefreshCandidates: return "refreshCandidates";
     }
     return nullptr;
 }
@@ -37,6 +38,7 @@ std::optional<Operation> parseOperation(std::string_view name) noexcept {
     if (name == "destroySession") return Operation::DestroySession;
     if (name == "deploy") return Operation::Deploy;
     if (name == "shutdown") return Operation::Shutdown;
+    if (name == "refreshCandidates") return Operation::RefreshCandidates;
     return std::nullopt;
 }
 
@@ -89,6 +91,11 @@ void appendNumber(std::string& output, std::uint64_t value) {
 
 bool textForWire(std::string_view value) noexcept {
     return value.size() <= kMaxTextBytes && validUtf8(value);
+}
+
+bool correctionTextForWire(std::string_view value) noexcept {
+    return value.size() <= kMaxCorrectionContextBytes &&
+           value.find('\0') == value.npos && validUtf8(value);
 }
 
 bool caretBoundary(std::string_view value, std::size_t offset) noexcept {
@@ -331,6 +338,9 @@ struct RequestPayload {
     bool hasConvert = false;
     bool wantsAppearance = false;
     bool hasWantsAppearance = false;
+    bool supportsCorrection = false;
+    bool hasSupportsCorrection = false;
+    std::optional<std::string> precedingText;
 };
 
 bool parseRequestPayload(Parser& parser, RequestPayload& payload) {
@@ -374,6 +384,14 @@ bool parseRequestPayload(Parser& parser, RequestPayload& payload) {
             } else if (key == "wantsAppearance") {
                 if (payload.hasWantsAppearance || !parser.boolean(payload.wantsAppearance)) return false;
                 payload.hasWantsAppearance = true;
+            } else if (key == "supportsCorrection") {
+                if (payload.hasSupportsCorrection || !parser.boolean(payload.supportsCorrection)) return false;
+                payload.hasSupportsCorrection = true;
+            } else if (key == "precedingText") {
+                if (payload.precedingText) return false;
+                payload.precedingText.emplace();
+                if (!parser.string(*payload.precedingText, kMaxCorrectionContextBytes) ||
+                    !correctionTextForWire(*payload.precedingText)) return false;
             } else {
                 return false;
             }
@@ -386,7 +404,8 @@ bool parseRequestPayload(Parser& parser, RequestPayload& payload) {
 }
 
 bool validateRequestPayload(Operation operation, const RequestPayload& payload) {
-    if (payload.hasWantsAppearance && operation != Operation::CreateSession) return false;
+    if ((payload.hasWantsAppearance || payload.hasSupportsCorrection) && operation != Operation::CreateSession) return false;
+    if (payload.precedingText && operation != Operation::ProcessKey) return false;
     switch (operation) {
     case Operation::ProcessKey:
         return payload.hasKeycode && payload.hasModifiers && !payload.hasCandidateIndex && !payload.hasSnapshotRevision && !payload.hasConvert;
@@ -395,6 +414,9 @@ bool validateRequestPayload(Operation operation, const RequestPayload& payload) 
                payload.hasSnapshotRevision && !payload.hasConvert;
     case Operation::Finalize:
         return !payload.hasKeycode && !payload.hasModifiers && !payload.hasCandidateIndex && !payload.hasSnapshotRevision && payload.hasConvert;
+    case Operation::RefreshCandidates:
+        return payload.hasSnapshotRevision && !payload.hasKeycode && !payload.hasModifiers &&
+               !payload.hasCandidateIndex && !payload.hasConvert;
     case Operation::Health:
     case Operation::CreateSession:
     case Operation::Cancel:
@@ -496,6 +518,12 @@ bool parseSnapshot(Parser& parser, Snapshot& snapshot) {
             } else if (key == "revision") {
                 if ((seen & (1u << 10)) != 0 || !parser.unsignedInteger(snapshot.revision)) return false;
                 seen |= 1u << 10;
+            } else if (key == "correctionAvailable") {
+                if ((seen & (1u << 11)) || !parser.boolean(snapshot.correctionAvailable)) return false;
+                seen |= 1u << 11;
+            } else if (key == "correctionPending") {
+                if ((seen & (1u << 12)) || !parser.boolean(snapshot.correctionPending)) return false;
+                seen |= 1u << 12;
             } else {
                 return false;
             }
@@ -504,19 +532,23 @@ bool parseSnapshot(Parser& parser, Snapshot& snapshot) {
             if (!parser.comma()) return false;
         }
     }
-    return seen == 0x7ffu && textForWire(snapshot.commitText) && textForWire(snapshot.rawInput) && textForWire(snapshot.preedit) &&
+    return (seen & 0x7ffu) == 0x7ffu && textForWire(snapshot.commitText) && textForWire(snapshot.rawInput) && textForWire(snapshot.preedit) &&
            caretBoundary(snapshot.preedit, snapshot.caretUtf8Offset);
 }
 
 bool validRequestForEncoding(const Request& request) noexcept {
     if (request.id.version != kProtocolVersion || !safeInteger(request.id.connectionEpoch) || !safeInteger(request.id.sessionId) ||
         !safeInteger(request.id.contextEpoch) || !safeInteger(request.id.sequence) || operationName(request.operation) == nullptr) return false;
-    if (request.wantsAppearance && request.operation != Operation::CreateSession) return false;
+    if ((request.wantsAppearance || request.supportsCorrection) && request.operation != Operation::CreateSession) return false;
+    if (request.precedingText && (request.operation != Operation::ProcessKey ||
+        !correctionTextForWire(*request.precedingText))) return false;
     switch (request.operation) {
     case Operation::ProcessKey:
         return true;
     case Operation::SelectCandidate:
         return request.candidateIndex < kMaxCandidates && safeInteger(request.snapshotRevision);
+    case Operation::RefreshCandidates:
+        return safeInteger(request.snapshotRevision);
     case Operation::Health:
     case Operation::CreateSession:
     case Operation::Finalize:
@@ -608,6 +640,8 @@ void appendSnapshot(std::string& output, const Snapshot& snapshot) {
     output += snapshot.asciiMode ? "true" : "false";
     output += ",\"revision\":";
     appendNumber(output, snapshot.revision);
+    if (snapshot.correctionAvailable) output += ",\"correctionAvailable\":true";
+    if (snapshot.correctionPending) output += ",\"correctionPending\":true";
     output += "}";
 }
 } // namespace
@@ -704,9 +738,12 @@ std::string encodeRequest(const Request& request) {
     case Operation::ProcessKey:
         comma(); output += "\"keycode\":"; appendNumber(output, request.keycode);
         comma(); output += "\"modifiers\":"; appendNumber(output, request.modifiers);
+        if (request.precedingText) { comma(); output += "\"precedingText\":"; appendJsonString(output, *request.precedingText); }
         break;
     case Operation::SelectCandidate:
         comma(); output += "\"candidateIndex\":"; appendNumber(output, request.candidateIndex);
+        [[fallthrough]];
+    case Operation::RefreshCandidates:
         comma(); output += "\"snapshotRevision\":"; appendNumber(output, request.snapshotRevision);
         break;
     case Operation::Finalize:
@@ -714,6 +751,7 @@ std::string encodeRequest(const Request& request) {
         break;
     case Operation::CreateSession:
         if (request.wantsAppearance) { comma(); output += "\"wantsAppearance\":true"; }
+        if (request.supportsCorrection) { comma(); output += "\"supportsCorrection\":true"; }
         break;
     case Operation::Health:
     case Operation::Cancel:
@@ -800,6 +838,8 @@ std::optional<Request> decodeRequest(std::string_view json) noexcept {
         request.snapshotRevision = payload.snapshotRevision;
         request.convert = payload.convert;
         request.wantsAppearance = payload.wantsAppearance;
+        request.supportsCorrection = payload.supportsCorrection;
+        request.precedingText = std::move(payload.precedingText);
         return request;
     } catch (...) {
         return std::nullopt;

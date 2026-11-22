@@ -32,6 +32,7 @@
 #include "resource.h"
 #include "StylePreview.h"
 #include "../Common/CandidateStyle.h"
+#include "../Common/CorrectionPreferences.h"
 #include "../Common/Pipe.h"
 #include "../Protocol/Protocol.h"
 
@@ -1663,6 +1664,69 @@ constexpr wchar_t kActivateMessageName[] = L"XMJD.Settings.Activate";
 constexpr wchar_t kSettingsDialogClass[] = L"#32770";
 constexpr wchar_t kSettingsDialogTitle[] = L"星猫键道设置";
 
+INT_PTR CALLBACK correctionProc(HWND dialog, UINT message, WPARAM wParam, LPARAM) {
+    const auto enableControls = [dialog] {
+        const BOOL on = IsDlgButtonChecked(dialog, IDC_CORRECTION_ENABLED) == BST_CHECKED;
+        EnableWindow(GetDlgItem(dialog, IDC_CORRECTION_STRENGTH), on);
+        EnableWindow(GetDlgItem(dialog, IDC_CORRECTION_LEAD), on);
+    };
+    if (message == WM_INITDIALOG) {
+        const auto prefs = xmjd::loadCorrectionPreferences(g_dataRoot);
+        CheckDlgButton(dialog, IDC_CORRECTION_ENABLED, prefs.enabled ? BST_CHECKED : BST_UNCHECKED);
+        SetDlgItemInt(dialog, IDC_CORRECTION_STRENGTH, prefs.strength, FALSE);
+        SendDlgItemMessageW(dialog, IDC_CORRECTION_STRENGTH, EM_SETLIMITTEXT, 3, 0);
+        for (int v = 10; v <= 30; ++v) {
+            const auto label = std::to_wstring(v / 10) + L"." + std::to_wstring(v % 10) + L" 倍";
+            SendDlgItemMessageW(dialog, IDC_CORRECTION_LEAD, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        }
+        SendDlgItemMessageW(dialog, IDC_CORRECTION_LEAD, CB_SETCURSEL, prefs.leadTenths - 10, 0);
+        enableControls();
+        return TRUE;
+    }
+    if (message != WM_COMMAND) return FALSE;
+    switch (LOWORD(wParam)) {
+    case IDC_CORRECTION_ENABLED:
+        enableControls();
+        return TRUE;
+    case IDC_CORRECTION_RESET:
+        if (MessageBoxW(dialog, L"只清除上下文纠错的选词和忽略记录，不影响词库。清除后无法恢复。", L"清除纠错学习记录？",
+                        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
+            auto prefs = xmjd::loadCorrectionPreferences(g_dataRoot);
+            FILETIME now{};
+            GetSystemTimeAsFileTime(&now);
+            prefs.learningReset = (static_cast<std::uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+            if (!xmjd::saveCorrectionPreferences(g_dataRoot, prefs))
+                MessageBoxW(dialog, L"无法保存，请检查用户目录。", L"上下文纠错", MB_OK | MB_ICONERROR);
+            else MessageBoxW(dialog, L"将在下次用键道6输入时清除纠错学习记录。", L"上下文纠错", MB_OK | MB_ICONINFORMATION);
+        }
+        return TRUE;
+    case IDOK: {
+        BOOL valid = FALSE;
+        const UINT strength = GetDlgItemInt(dialog, IDC_CORRECTION_STRENGTH, &valid, FALSE);
+        const auto lead = SendDlgItemMessageW(dialog, IDC_CORRECTION_LEAD, CB_GETCURSEL, 0, 0);
+        if (!valid || strength > 100 || lead < 0 || lead > 20) {
+            MessageBoxW(dialog, L"请输入 0–100 的纠错强度并选择领先倍数。", L"上下文纠错", MB_OK | MB_ICONWARNING);
+            return TRUE;
+        }
+        auto prefs = xmjd::loadCorrectionPreferences(g_dataRoot);
+        prefs.enabled = IsDlgButtonChecked(dialog, IDC_CORRECTION_ENABLED) == BST_CHECKED;
+        prefs.strength = static_cast<int>(strength);
+        prefs.leadTenths = static_cast<int>(lead) + 10;
+        if (!xmjd::saveCorrectionPreferences(g_dataRoot, prefs)) {
+            MessageBoxW(dialog, L"无法保存，请检查用户目录。", L"上下文纠错", MB_OK | MB_ICONERROR);
+            return TRUE;
+        }
+        EndDialog(dialog, IDOK);
+        return TRUE;
+    }
+    case IDCANCEL:
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
 INT_PTR CALLBACK settingsProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam) {
     (void)lParam;
     // 另一个实例点了"设置"：把自己提到前面，不再另开窗口。
@@ -1718,11 +1782,24 @@ INT_PTR CALLBACK settingsProc(HWND dialog, UINT message, WPARAM wParam, LPARAM l
                                  IDC_STYLE_PADDING, IDC_STYLE_ITEM_SPACING, IDC_STYLE_PAD_H, IDC_STYLE_PAD_V,
                                  IDC_STYLE_ITEM_RADIUS, IDC_COLOR_BG, IDC_COLOR_TEXT, IDC_COLOR_SELECTED_TEXT,
                                  IDC_COLOR_SECONDARY, IDC_COLOR_HIGHLIGHT_START, IDC_COLOR_HIGHLIGHT_END,
-                                 IDC_COLOR_BG_END}) {
+                                 IDC_COLOR_BG_END, IDC_CORRECTION_SETTINGS}) {
                 if (!GetDlgItem(dialog, id)) {
                     EndDialog(dialog, 0);
                     return TRUE;
                 }
+            }
+            const HWND correctionDialog = CreateDialogParamW(
+                reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(dialog, GWLP_HINSTANCE)),
+                MAKEINTRESOURCEW(IDD_CORRECTION), dialog, correctionProc, 0);
+            const bool correctionControls = correctionDialog &&
+                GetDlgItem(correctionDialog, IDC_CORRECTION_ENABLED) &&
+                GetDlgItem(correctionDialog, IDC_CORRECTION_STRENGTH) &&
+                GetDlgItem(correctionDialog, IDC_CORRECTION_RESET) &&
+                SendDlgItemMessageW(correctionDialog, IDC_CORRECTION_LEAD, CB_GETCOUNT, 0, 0) == 21;
+            if (correctionDialog) DestroyWindow(correctionDialog);
+            if (!correctionControls) {
+                EndDialog(dialog, 0);
+                return TRUE;
             }
             // 记下真实像素尺寸：对话框按 DLU 布局，缩放到具体 DPI 后是否还装得下
             // 只能实测，不然预览框被压窄了也看不出来。
@@ -1788,6 +1865,10 @@ INT_PTR CALLBACK settingsProc(HWND dialog, UINT message, WPARAM wParam, LPARAM l
         return FALSE;
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case IDC_CORRECTION_SETTINGS:
+            DialogBoxParamW(reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(dialog, GWLP_HINSTANCE)),
+                            MAKEINTRESOURCEW(IDD_CORRECTION), dialog, correctionProc, 0);
+            return TRUE;
         case IDC_APPLY: applySelection(); return TRUE;
         case IDC_REDEPLOY: redeployOnly(); return TRUE;
         case IDC_START_HOST: startEngine(); return TRUE;

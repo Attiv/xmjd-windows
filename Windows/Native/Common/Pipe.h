@@ -35,6 +35,7 @@ struct VerifiedClient {
         case Operation::Finalize:
         case Operation::Cancel:
         case Operation::DestroySession:
+        case Operation::RefreshCandidates:
             return true;
         case Operation::Health:
             return kind != PipeClientKind::Elevated;

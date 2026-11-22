@@ -19,8 +19,9 @@ inline constexpr std::uint32_t kShiftTapMask = 1u << 31;
 inline constexpr std::uint32_t kLeftShiftKey = 0xffe1;
 inline constexpr std::uint32_t kRightShiftKey = 0xffe2;
 inline constexpr std::size_t kMaxCandidateAppearanceBytes = 16 * 1024;
+inline constexpr std::size_t kMaxCorrectionContextBytes = 256;
 
-enum class Operation { Health, CreateSession, ProcessKey, SelectCandidate, Finalize, Cancel, DestroySession, Deploy, Shutdown };
+enum class Operation { Health, CreateSession, ProcessKey, SelectCandidate, Finalize, Cancel, DestroySession, Deploy, Shutdown, RefreshCandidates };
 enum class Status { Ok, Unavailable, Busy, Stale, UnsupportedVersion, InvalidRequest, EngineFailure };
 struct Identity {
     std::uint32_t version = kProtocolVersion;
@@ -39,6 +40,8 @@ struct Request {
     std::uint64_t snapshotRevision = 0;
     bool convert = true;
     bool wantsAppearance = false; // Opt-in on CreateSession; legacy replies stay unchanged.
+    bool supportsCorrection = false;
+    std::optional<std::string> precedingText; // Present only at composition start; never stored by IPC.
 };
 struct Candidate {
     std::string text;
@@ -57,6 +60,8 @@ struct Snapshot {
     bool lastPage = true;
     bool asciiMode = false;
     std::uint64_t revision = 0;
+    bool correctionAvailable = false;
+    bool correctionPending = false;
 };
 struct Response {
     Identity id;
@@ -98,5 +103,8 @@ public:
     virtual void cancel(std::uint64_t session) = 0;
     // 默认一次性取出 commit；drainCommit=false 返回空 commitText，保留待提交内容。
     virtual Snapshot snapshot(std::uint64_t session, bool drainCommit = true) = 0;
+    virtual bool correctionAvailable(std::uint64_t) { return false; }
+    virtual void setCorrectionContext(std::uint64_t, std::string_view) {}
+    virtual std::optional<Snapshot> refreshCandidates(std::uint64_t) { return std::nullopt; }
 };
 } // namespace xmjd

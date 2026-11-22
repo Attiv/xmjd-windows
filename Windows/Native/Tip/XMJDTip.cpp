@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <olectl.h>
 #include <msctf.h>
+#include <inputscope.h>
 #include <ctfutb.h>
 #include <oleauto.h>
 #include <shellapi.h>
@@ -27,12 +28,15 @@
 #include <cstring>
 #include "CandidateRenderer.h"
 #include "CandidatePopup.h"
+#include "../Common/CorrectionPreferences.h"
 
 namespace xmjd::tip {
 namespace {
 const CLSID kTipClsid = {0x5f8f59f4, 0xe5a8, 0x4944, {0x96, 0x0b, 0x8a, 0x8a, 0xd3, 0xbe, 0x88, 0x57}};
 const GUID kProfileGuid = {0xc1fa1c93, 0xe62a, 0x4eda, {0xb2, 0x5a, 0xbc, 0x91, 0xc3, 0x3c, 0xca, 0x69}};
 const GUID kCandidateElementGuid = {0x7f58bce8, 0xd956, 0x4bdb, {0xb8, 0x34, 0x51, 0xdd, 0xc8, 0x5b, 0x46, 0x12}};
+// The SDK declares GUID_PROP_INPUTSCOPE but uuid.lib does not export it.
+constexpr GUID kInputScopeProperty = {0x1713dd5a, 0x68e7, 0x4a5b, {0x9a, 0xf6, 0x59, 0x2a, 0x59, 0x5c, 0x77, 0x8d}};
 constexpr LANGID kLanguageId = 0x0804;
 constexpr UINT kMaxPopupRows = 10;
 constexpr UINT kMaskShift = 1u << 0;
@@ -47,6 +51,8 @@ constexpr wchar_t kInstallMetadataKey[] = L"Software\\XMJD";
 constexpr wchar_t kHostExecutableValue[] = L"HostExecutablePath";
 constexpr UINT_PTR kEngineRetryTimerId = 0x584d4a44;
 constexpr UINT kEngineRetryIntervalMs = 500;
+constexpr UINT_PTR kCorrectionTimerId = 0x584d4a45;
+constexpr UINT kCorrectionIntervalMs = 45;
 constexpr ULONGLONG kHostLaunchIntervalMs = 2000;
 constexpr wchar_t kPopupClassName[] = L"XMJD.TSF.CandidatePopup.v1";
 // Windows apps filter out desktop-only TIPs before ActivateEx. A language-bar
@@ -734,6 +740,8 @@ bool XMJDTip::ensureContext(ITfContext* context) {
 void XMJDTip::invalidateSession(bool closePipe) noexcept {
     hasEngineSession_ = false;
     sessionId_ = 0;
+    correctionAvailable_ = false;
+    scheduleCorrectionRefresh(false);
     if (closePipe) pipe_.close();
 }
 
@@ -843,11 +851,12 @@ bool XMJDTip::createEngineSession() {
     }
     Request request;
     request.wantsAppearance = allowCandidateAppearance_ && (activationFlags_ & TF_TMF_IMMERSIVEMODE) != 0;
+    request.supportsCorrection = allowCandidateAppearance_ && !request.wantsAppearance && !pipe_.inputOnly();
     Response response;
     if (!transact(Operation::CreateSession, request, response)) {
         logTipEvent("engine-session transact-failed");
         pipe_.close();
-        if (request.wantsAppearance) {
+        if (request.wantsAppearance || request.supportsCorrection) {
             // Older Hosts reject the extra field. Reconnect with the plain request once.
             allowCandidateAppearance_ = false;
             if (createEngineSession()) return true;
@@ -863,6 +872,7 @@ bool XMJDTip::createEngineSession() {
         pipe_.close();
         return false;
     }
+    correctionAvailable_ = request.supportsCorrection && response.snapshot.correctionAvailable;
     if (response.appearance) {
         try {
             xmjd::CandidateStyle style;
@@ -941,6 +951,85 @@ void XMJDTip::cancelEngineRetry() noexcept {
     if (engineRetryWindow_) KillTimer(engineRetryWindow_, kEngineRetryTimerId);
     engineRetryScheduled_ = false;
 }
+
+void XMJDTip::scheduleCorrectionRefresh(bool pending) {
+    if (engineRetryWindow_) KillTimer(engineRetryWindow_, kCorrectionTimerId);
+    correctionDeadline_ = 0;
+    if (!pending || !foreground_ || !context_ || !hasEngineSession_ || !engineRetryWindow_) return;
+    correctionDeadline_ = GetTickCount64() + 2000;
+    SetTimer(engineRetryWindow_, kCorrectionTimerId, kCorrectionIntervalMs, nullptr);
+}
+
+void XMJDTip::pollCorrection() {
+    if (!correctionDeadline_ || GetTickCount64() >= correctionDeadline_ || !composition_ ||
+        !context_ || !isCurrentContext(context_) || !hasEngineSession_) {
+        scheduleCorrectionRefresh(false);
+        return;
+    }
+    if (processingEdit_ || resettingContext_) return;
+    EditSession* edit = new (std::nothrow) EditSession(this, EditAction::RefreshCandidates,
+                                                    0, 0, 0, candidateRevision_, contextEpoch_);
+    if (!edit) return;
+    HRESULT result = E_FAIL;
+    requestEdit(context_, edit, TF_ES_SYNC | TF_ES_READ, &result);
+    edit->Release();
+}
+
+namespace {
+bool privateInputScope(ITfContext* context, TfEditCookie cookie, ITfRange* range) {
+    ComPtr<ITfReadOnlyProperty> prop;
+    if (FAILED(context->GetAppProperty(kInputScopeProperty, &prop)) || !prop) return false;
+    VARIANT value{};
+    VariantInit(&value);
+    bool protect = false;
+    if (SUCCEEDED(prop->GetValue(cookie, range, &value)) && value.vt == VT_UNKNOWN && value.punkVal) {
+        ComPtr<ITfInputScope> scope;
+        if (FAILED(value.punkVal->QueryInterface(IID_PPV_ARGS(&scope))) || !scope) {
+            protect = true;
+        } else {
+            InputScope* scopes = nullptr;
+            UINT count = 0;
+            if (FAILED(scope->GetInputScopes(&scopes, &count)) || (!scopes && count)) protect = true;
+            else for (UINT i = 0; i < count; ++i) {
+                if (scopes[i] == IS_PASSWORD || scopes[i] == IS_NUMERIC_PASSWORD ||
+                    scopes[i] == IS_NUMERIC_PIN || scopes[i] == IS_ALPHANUMERIC_PIN ||
+                    scopes[i] == IS_PRIVATE) protect = true;
+            }
+            CoTaskMemFree(scopes);
+        }
+    }
+    VariantClear(&value);
+    return protect;
+}
+
+std::string textBeforeSelection(ITfContext* context, TfEditCookie cookie) {
+    TF_SELECTION selection{};
+    ULONG fetched = 0;
+    const auto selected = context->GetSelection(cookie, TF_DEFAULT_SELECTION, 1, &selection, &fetched);
+    ComPtr<ITfRange> range;
+    range.Attach(selection.range);
+    if (FAILED(selected) || !fetched || !range || privateInputScope(context, cookie, range.Get())) return {};
+    BOOL empty = FALSE;
+    if (FAILED(range->IsEmpty(cookie, &empty)) || !empty) return {};
+    if (FAILED(range->Collapse(cookie, TF_ANCHOR_START))) return {};
+    LONG shifted = 0;
+    if (FAILED(range->ShiftStart(cookie, -128, &shifted, nullptr)) || shifted >= 0 ||
+        privateInputScope(context, cookie, range.Get())) return {};
+    wchar_t buffer[128]{};
+    ULONG length = 0;
+    if (FAILED(range->GetText(cookie, 0, buffer, ARRAYSIZE(buffer), &length)) || !length || length > ARRAYSIZE(buffer)) return {};
+    std::wstring_view text(buffer, length);
+    if (text.front() >= 0xdc00 && text.front() <= 0xdfff) text.remove_prefix(1);
+    std::size_t start = text.size();
+    for (unsigned n = 0; n < 64 && start > 0; ++n) {
+        --start;
+        if (text[start] >= 0xdc00 && text[start] <= 0xdfff && start > 0) --start;
+    }
+    auto utf8 = xmjd::win::narrow(text.substr(start));
+    if (utf8.find('\0') != utf8.npos || utf8.size() > kMaxCorrectionContextBytes) return {};
+    return utf8;
+}
+} // namespace
 
 bool XMJDTip::startComposition(EditSession* edit, TfEditCookie cookie) {
     if (!isValidEdit(edit)) return false;
@@ -1123,6 +1212,7 @@ void XMJDTip::reportImeMode(bool asciiMode) {
 bool XMJDTip::applySnapshot(EditSession* edit, TfEditCookie cookie, const Snapshot& snapshot) {
     if (!isValidEdit(edit)) return false;
     reportImeMode(snapshot.asciiMode);
+    correctionAvailable_ = snapshot.correctionAvailable;
     if (!snapshot.commitText.empty()) {
         const std::u16string utf16 = utf8ToUtf16(snapshot.commitText);
         if (!validUtf8(snapshot.commitText) || !commitText(edit, cookie, std::wstring_view(reinterpret_cast<const wchar_t*>(utf16.data()), utf16.size()))) return false;
@@ -1139,6 +1229,7 @@ bool XMJDTip::applySnapshot(EditSession* edit, TfEditCookie cookie, const Snapsh
     acknowledgedRaw_ = toWide(snapshot.rawInput);
     candidateRevision_ = snapshot.revision;
     updateCandidateUi(snapshot, cookie);
+    scheduleCorrectionRefresh(snapshot.correctionPending);
     return true;
 }
 
@@ -1468,6 +1559,33 @@ HRESULT XMJDTip::process(EditSession* edit, TfEditCookie cookie) {
                 !candidateElement_->isShown() || candidateElement_->snapshot().epoch != edit->epoch_) return S_FALSE;
             return positionCandidateWindow(cookie) ? S_OK : S_FALSE;
         }
+        if (edit->action_ == EditAction::RefreshCandidates) {
+            if (!composition_ || !hasEngineSession_ || edit->revision_ != candidateRevision_) return S_FALSE;
+            Request request;
+            request.snapshotRevision = edit->revision_;
+            Response response;
+            if (!transact(Operation::RefreshCandidates, request, response)) {
+                scheduleCorrectionRefresh(false);
+                if (!pipe_.connected()) {
+                    invalidateSession(false);
+                    contextUnavailable_ = true;
+                    scheduleEngineRetry();
+                }
+                return S_FALSE;
+            }
+            if (response.status == Status::Busy) return S_FALSE;
+            if (response.status != Status::Ok || !isValidEdit(edit)) {
+                scheduleCorrectionRefresh(false);
+                return S_FALSE;
+            }
+            if (response.snapshot.correctionPending) return S_FALSE;
+            scheduleCorrectionRefresh(false);
+            if (!response.handled || !response.snapshot.commitText.empty() ||
+                acknowledgedRaw_ != toWide(response.snapshot.rawInput)) return S_FALSE;
+            candidateRevision_ = response.snapshot.revision;
+            updateCandidateUi(response.snapshot, cookie);
+            return S_OK;
+        }
         if (edit->action_ == EditAction::SelectCandidate) {
             edit->handled_ = processCandidateSelection(edit, cookie);
             return edit->handled_ ? S_OK : S_FALSE;
@@ -1514,6 +1632,13 @@ HRESULT XMJDTip::process(EditSession* edit, TfEditCookie cookie) {
         Request request;
         request.keycode = edit->keycode_;
         request.modifiers = edit->modifiers_;
+        if (correctionAvailable_ && !asciiMode_ && !composition_ && acknowledgedRaw_.empty() &&
+            edit->keycode_ >= 'a' && edit->keycode_ <= 'z' &&
+            (edit->modifiers_ & ~(kMaskShift | kMaskLock)) == 0) {
+            // Don't read editor content while the user has switched correction off.
+            request.precedingText = loadCorrectionPreferences(xmjd::win::dataRoot()).enabled ?
+                textBeforeSelection(context_, cookie) : std::string{};
+        }
         Response response;
         // 一旦发送，超时后的处理状态不确定，禁止把同一按键再交给宿主。
         edit->consumed_ = true;
@@ -1944,6 +2069,10 @@ LRESULT CALLBACK XMJDTip::popupWndProc(HWND window, UINT message, WPARAM wParam,
         return DefWindowProcW(window, message, wParam, lParam);
     }
     ComPtr<XMJDTip> keepAlive = owner;
+    if (message == WM_TIMER && wParam == kCorrectionTimerId && owner && owner->engineRetryWindow_ == window) {
+        try { owner->pollCorrection(); } catch (...) { owner->scheduleCorrectionRefresh(false); }
+        return 0;
+    }
     if (message == WM_TIMER && wParam == kEngineRetryTimerId && owner && owner->engineRetryWindow_ == window) {
         try {
             if (!owner->processingEdit_) owner->retryEngineSession();

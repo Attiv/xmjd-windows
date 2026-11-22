@@ -1,4 +1,5 @@
 #include "RimeRuntime.h"
+#include "../Common/CorrectionPreferences.h"
 #include "../Common/Pipe.h"
 #include "Version.h"
 
@@ -329,6 +330,7 @@ bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
         if (pendingInitialDeploy || explicitDeploy) {
             if (!runDeployment(errorCode)) return false;
         }
+        prepareCorrection();
         if (!validateSchemas(errorCode)) return false;
         if (!loadSelectedSchema()) {
             errorCode = kRuntimeErrorSchema;
@@ -686,6 +688,7 @@ bool RimeRuntime::redeploy(int& errorCode) {
     }
     sessions_.clear();
     if (!runDeployment(errorCode)) return false;
+    prepareCorrection();
     if (!validateSchemas(errorCode)) return false;
     if (!loadSelectedSchema()) {
         errorCode = kRuntimeErrorSchema;
@@ -837,6 +840,107 @@ void RimeRuntime::writeEngineProbe() {
               std::string(XMJD_VERSION_STRING) + ":" + selectedSchema_);
 }
 
+void RimeRuntime::prepareCorrection() noexcept {
+    try {
+        const auto resources = executableDirectory_ / L"Resources" / L"MSIME";
+        if (!RIME_API_AVAILABLE(api_, set_property) || !RIME_API_AVAILABLE(api_, get_property) ||
+            !hasFile(resources / L"model.ort") || !hasFile(resources / L"vocab.tsv") ||
+            !hasFile(resources / L"onnxruntime.dll")) return;
+        correctionSchemas_ = correction::installHooks(stagingDirectory_ / L"Rime", sharedDirectory_, userDirectory_, resources);
+        if (!correctionSchemas_.empty() && !correctionWorker_)
+            correctionWorker_ = std::make_unique<correction::Worker>(resources);
+    } catch (...) {
+        correctionSchemas_.clear();
+        OutputDebugStringW(L"XMJD MSIME hooks unavailable; continued ordinary Rime input.\n");
+    }
+}
+
+bool RimeRuntime::correctionAvailable(std::uint64_t session) {
+    auto* state = findSession(session);
+    if (!state || !correctionWorker_ || correctionSchemas_.empty()) return false;
+    RimeStatus status{};
+    RIME_STRUCT_INIT(RimeStatus, status);
+    const std::unique_ptr<RimeStatus, decltype(api_->free_status)> cleanup(&status, api_->free_status);
+    return api_->get_status(state->id, &status) && status.schema_id && correctionSchemas_.count(status.schema_id) != 0;
+}
+
+void RimeRuntime::setCorrectionContext(std::uint64_t session, std::string_view text) {
+    auto* state = findSession(session);
+    if (!state || !correctionAvailable(session)) return;
+    const char* raw = api_->get_input(state->id);
+    if ((raw && *raw) || api_->get_option(state->id, "ascii_mode")) return;
+    try {
+        const auto p = loadCorrectionPreferences(rootDirectory_);
+        state->precedingText = p.enabled ? correction::trailingContext(text) : std::string{};
+        state->pendingPool.clear();
+        state->correction = {};
+        api_->set_property(state->id, "xmjd6_msime_epoch", std::to_string(++state->correctionEpoch).c_str());
+        api_->set_property(state->id, "xmjd6_msime_scores", "");
+        api_->set_property(state->id, "xmjd6_msime_strength", std::to_string(p.strength).c_str());
+        api_->set_property(state->id, "xmjd6_msime_lead", std::to_string(p.leadTenths).c_str());
+        const auto reset = p.learningReset ? std::to_string(p.learningReset) : std::string{};
+        api_->set_property(state->id, "xmjd6_learning_reset", reset.c_str());
+        api_->set_property(state->id, "xmjd6_context_features_enabled", state->precedingText.empty() ? "0" : "1");
+        const auto prefix = "\x01" + state->precedingText;
+        api_->set_property(state->id, "xmjd6_before_cursor", prefix.c_str());
+    } catch (...) {
+        state->precedingText.clear();
+        state->pendingPool.clear();
+        state->correction = {};
+        api_->set_property(state->id, "xmjd6_context_features_enabled", "0");
+    }
+}
+
+void RimeRuntime::queueCorrection(Session& state, Snapshot& snapshot) noexcept {
+    try {
+        if (!correctionWorker_ || state.precedingText.empty() || snapshot.asciiMode ||
+            snapshot.page || snapshot.highlightedIndex || !correction::validCode(snapshot.rawInput) ||
+            snapshot.candidates.empty()) {
+            state.correction = {};
+            state.pendingPool.clear();
+            return;
+        }
+        char text[16'384]{};
+        if (!api_->get_property(state.id, "xmjd6_msime_pool", text, sizeof(text))) return;
+        const std::string_view pool(text);
+        const auto header = "msime2\t" + std::to_string(state.correctionEpoch) + "\t" + snapshot.rawInput + "\n";
+        if (pool.substr(0, header.size()) != header) return;
+        if (state.pendingPool != pool) {
+            state.pendingPool.assign(pool);
+            state.correction = correctionWorker_->submit(state.precedingText, state.pendingPool);
+        }
+        snapshot.correctionPending = state.correction.valid();
+    } catch (...) {
+        state.correction = {};
+        state.pendingPool.clear();
+    }
+}
+
+std::optional<Snapshot> RimeRuntime::refreshCandidates(std::uint64_t session) {
+    auto* state = findSession(session);
+    if (!state || !state->correction.valid()) return std::nullopt;
+    try {
+        if (state->correction.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+            Snapshot pending;
+            pending.correctionPending = true;
+            return pending;
+        }
+        const auto scores = state->correction.get();
+        if (scores.empty()) return std::nullopt;
+        const auto current = snapshot(session, false);
+        char text[16'384]{};
+        const auto header = "msime2\t" + std::to_string(state->correctionEpoch) + "\t" + current.rawInput + "\n";
+        if (current.asciiMode || current.page || current.highlightedIndex ||
+            state->pendingPool.compare(0, header.size(), header) != 0 ||
+            !api_->get_property(state->id, "xmjd6_msime_pool", text, sizeof(text)) || state->pendingPool != text)
+            return std::nullopt;
+        api_->set_property(state->id, "xmjd6_msime_scores", scores.c_str());
+        return snapshot(session, false);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 Snapshot RimeRuntime::snapshot(std::uint64_t session, bool drainCommit) {
     Snapshot result;
     auto* state = findSession(session);
@@ -847,6 +951,18 @@ Snapshot RimeRuntime::snapshot(std::uint64_t session, bool drainCommit) {
         result.commitText += takeCommit(api_, state->id);
     }
     if (const char* input = api_->get_input(state->id)) result.rawInput.assign(input);
+    if (drainCommit && !result.rawInput.empty() && !result.commitText.empty() &&
+        state->correctionEpoch && !state->precedingText.empty()) {
+        try {
+            state->precedingText = correction::trailingContext(state->precedingText + result.commitText);
+            state->pendingPool.clear();
+            state->correction = {};
+            api_->set_property(state->id, "xmjd6_msime_epoch", std::to_string(++state->correctionEpoch).c_str());
+            api_->set_property(state->id, "xmjd6_msime_scores", "");
+            const auto prefix = "\x01" + state->precedingText;
+            api_->set_property(state->id, "xmjd6_before_cursor", prefix.c_str());
+        } catch (...) { state->precedingText.clear(); }
+    }
 
     RimeContext context{};
     RIME_STRUCT_INIT(RimeContext, context);
@@ -877,7 +993,9 @@ Snapshot RimeRuntime::snapshot(std::uint64_t session, bool drainCommit) {
     const std::unique_ptr<RimeStatus, decltype(api_->free_status)> statusCleanup(&status, api_->free_status);
     if (api_->get_status(state->id, &status)) {
         result.asciiMode = status.is_ascii_mode != 0;
+        result.correctionAvailable = correctionWorker_ && status.schema_id && correctionSchemas_.count(status.schema_id) != 0;
     }
+    if (drainCommit) queueCorrection(*state, result);
     return result;
 }
 } // namespace xmjd::win

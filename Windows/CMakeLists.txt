@@ -215,6 +215,7 @@ enable_language(RC)
 add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
 add_library(xmjd_windows_common STATIC
   Native/Common/Pipe.cpp
+  Native/Common/CorrectionPreferences.cpp
   Native/Common/CandidateStyle.cpp
   Native/Common/CandidatePainter.cpp)
 target_include_directories(xmjd_windows_common PUBLIC
@@ -365,6 +366,15 @@ if(XMJD_ARCH STREQUAL "x64")
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
     VS_DPI_AWARE "PerMonitor")
   install(TARGETS XMJDSettings RUNTIME DESTINATION .)
+  include(cmake/PrepareMsime.cmake)
+  set(XMJD_MSIME_ASSETS "${XMJD_ROOT}/Resources/MSIME")
+  file(SHA256 "${XMJD_MSIME_ASSETS}/model.ort" _msime_model_hash)
+  if(NOT _msime_model_hash STREQUAL "e036febfb8f7bdf941f1637be127ff539ea95b937a4c2a27f4c6ab897138fc6c")
+    message(FATAL_ERROR "MSIME model hash differs from the Mac model")
+  endif()
+  add_library(xmjd_msime STATIC Native/Host/Correction/ContextualCorrection.cpp
+    Native/Host/Correction/msime_scorer.cpp)
+  target_link_libraries(xmjd_msime PUBLIC xmjd_windows_common)
   add_executable(XMJDHost
     Native/Host/Main.cpp
     Native/Host/RimeRuntime.cpp
@@ -374,8 +384,14 @@ if(XMJD_ARCH STREQUAL "x64")
   # --deploy/--probe/--health 的输出照常可见。
   target_link_options(XMJDHost PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup)
   target_include_directories(XMJDHost PRIVATE "${XMJD_RIME_INCLUDE_DIR}" "${XMJD_GENERATED_DIR}")
-  target_link_libraries(XMJDHost PRIVATE xmjd_windows_common ole32 advapi32 userenv)
+  target_link_libraries(XMJDHost PRIVATE xmjd_windows_common xmjd_msime ole32 advapi32 userenv)
   add_custom_command(TARGET XMJDHost POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${XMJD_MSIME_ASSETS}" "$<TARGET_FILE_DIR:XMJDHost>/Resources/MSIME"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${XMJD_MSIME_RUNTIME}" "$<TARGET_FILE_DIR:XMJDHost>/Resources/MSIME"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${XMJD_MSIME_RUNTIME_DIR}/ThirdPartyNotices.txt" "$<TARGET_FILE_DIR:XMJDHost>/Resources/MSIME/ONNXRuntime-ThirdPartyNotices.txt"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${XMJD_RIME_DLLS} "$<TARGET_FILE_DIR:XMJDHost>"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
             "${XMJD_RIME_RESOURCES}" "$<TARGET_FILE_DIR:XMJDHost>/Resources/Rime"
@@ -392,7 +408,7 @@ if(XMJD_ARCH STREQUAL "x64")
       Tests/RimeRuntimeTests.cpp
       Native/Host/RimeRuntime.cpp)
     target_include_directories(RimeRuntimeTests PRIVATE "${XMJD_RIME_INCLUDE_DIR}" "${XMJD_GENERATED_DIR}")
-    target_link_libraries(RimeRuntimeTests PRIVATE xmjd_windows_common ole32)
+    target_link_libraries(RimeRuntimeTests PRIVATE xmjd_windows_common xmjd_msime ole32)
     add_dependencies(RimeRuntimeTests XMJDHost)
     add_test(NAME RimeSettingsSchemaTests COMMAND RimeRuntimeTests --settings-schema)
     set_tests_properties(RimeSettingsSchemaTests PROPERTIES LABELS "unit;settings")
@@ -405,6 +421,9 @@ if(XMJD_ARCH STREQUAL "x64")
     "${XMJD_RIME_ROOT}/xmjd-librime-lock.json" "${XMJD_ROOT}/librime.lock.json"
     "${XMJD_RIME_ROOT}/version-info.txt" "${XMJD_ROOT}/VERSION" DESTINATION .)
   install(DIRECTORY "${XMJD_RIME_RESOURCES}" DESTINATION Resources)
+  install(DIRECTORY "${XMJD_MSIME_ASSETS}/" "${XMJD_MSIME_RUNTIME}/" DESTINATION Resources/MSIME)
+  install(FILES "${XMJD_MSIME_RUNTIME_DIR}/LICENSE" DESTINATION Resources/MSIME RENAME ONNXRuntime-LICENSE)
+  install(FILES "${XMJD_MSIME_RUNTIME_DIR}/ThirdPartyNotices.txt" DESTINATION Resources/MSIME RENAME ONNXRuntime-ThirdPartyNotices.txt)
   install(DIRECTORY "${XMJD_RIME_ROOT}/licenses" "${XMJD_RIME_ROOT}/share" DESTINATION .)
   install(FILES "${XMJD_ROOT}/README.md" "${XMJD_ROOT}/IMPLEMENTATION_PLAN.md"
     "${XMJD_ROOT}/LICENSE.txt" "${XMJD_ROOT}/THIRD_PARTY_NOTICES.txt" DESTINATION .)

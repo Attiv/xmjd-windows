@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "rime_api.h"
+#include "Correction/ContextualCorrection.h"
 
 namespace xmjd::win {
 namespace detail {
@@ -38,11 +39,18 @@ public:
     void finalize(std::uint64_t session, bool convert) override;
     void cancel(std::uint64_t session) override;
     Snapshot snapshot(std::uint64_t session, bool drainCommit = true) override;
+    bool correctionAvailable(std::uint64_t session) override;
+    void setCorrectionContext(std::uint64_t session, std::string_view text) override;
+    std::optional<Snapshot> refreshCandidates(std::uint64_t session) override;
 
 private:
     struct Session {
         RimeSessionId id = 0;
         std::string pendingRawCommit;
+        std::uint64_t correctionEpoch = 0;
+        std::string precedingText;
+        std::string pendingPool;
+        std::future<std::string> correction;
     };
 
     bool loadLibrary(int& errorCode);
@@ -62,6 +70,8 @@ private:
     void rememberSessionSchema(RimeSessionId session);
     bool probeUpToDate() const;
     void writeEngineProbe();
+    void prepareCorrection() noexcept;
+    void queueCorrection(Session&, Snapshot&) noexcept;
 
     std::filesystem::path executableDirectory_;
     std::filesystem::path rootDirectory_;
@@ -84,5 +94,7 @@ private:
     bool ready_ = false;
     std::uint64_t nextSession_ = 1;
     std::unordered_map<std::uint64_t, Session> sessions_;
+    std::unordered_set<std::string> correctionSchemas_;
+    std::unique_ptr<correction::Worker> correctionWorker_;
 };
 } // namespace xmjd::win

@@ -17,12 +17,20 @@ Response resultFor(const Request& request, Status status) {
 
 bool isSessionOperation(Operation operation) noexcept {
     return operation == Operation::ProcessKey || operation == Operation::SelectCandidate || operation == Operation::Finalize ||
-           operation == Operation::Cancel || operation == Operation::DestroySession;
+           operation == Operation::Cancel || operation == Operation::DestroySession ||
+           operation == Operation::RefreshCandidates;
 }
 
 bool isMutation(Operation operation) noexcept {
     return operation == Operation::ProcessKey || operation == Operation::SelectCandidate || operation == Operation::Finalize ||
            operation == Operation::Cancel || operation == Operation::DestroySession;
+}
+
+void restrictCorrectionSnapshot(Snapshot& snapshot, bool negotiated) noexcept {
+    if (!negotiated) {
+        snapshot.correctionAvailable = false;
+        snapshot.correctionPending = false;
+    }
 }
 } // namespace
 
@@ -64,7 +72,7 @@ Response BrokerConnection::dispatch(const Request& request) {
             if (engineId == 0) return resultFor(request, Status::EngineFailure);
             const std::uint64_t sessionId = nextSession_++;
             try {
-                sessions_.emplace(sessionId, Session{engineId, request.id.contextEpoch, 0});
+                sessions_.emplace(sessionId, Session{engineId, request.id.contextEpoch, 0, request.supportsCorrection});
             } catch (...) {
                 try {
                     engine_.destroySession(engineId);
@@ -76,6 +84,7 @@ Response BrokerConnection::dispatch(const Request& request) {
             response.id.sessionId = sessionId;
             response.handled = true;
             response.snapshot.asciiMode = engine_.snapshot(engineId, false).asciiMode;
+            response.snapshot.correctionAvailable = request.supportsCorrection && engine_.correctionAvailable(engineId);
             return response;
         }
 
@@ -84,7 +93,7 @@ Response BrokerConnection::dispatch(const Request& request) {
         if (sessionIt == sessions_.end()) return resultFor(request, Status::Stale);
         Session& session = sessionIt->second;
         if (request.id.contextEpoch != session.contextEpoch) return resultFor(request, Status::Stale);
-        if (request.operation == Operation::SelectCandidate) {
+        if (request.operation == Operation::SelectCandidate || request.operation == Operation::RefreshCandidates) {
             if (request.candidateIndex >= kMaxCandidates) return resultFor(request, Status::InvalidRequest);
             if (request.snapshotRevision != session.revision) return resultFor(request, Status::Stale);
         }
@@ -98,7 +107,23 @@ Response BrokerConnection::dispatch(const Request& request) {
         }
 
         if (session.revision == std::numeric_limits<std::uint64_t>::max()) return resultFor(request, Status::EngineFailure);
+        if (request.operation == Operation::RefreshCandidates) {
+            if (!session.correction) return resultFor(request, Status::InvalidRequest);
+            Response response = resultFor(request, Status::Ok);
+            auto refreshed = engine_.refreshCandidates(session.engineId);
+            if (refreshed) {
+                response.snapshot = std::move(*refreshed);
+                if (!response.snapshot.correctionPending) {
+                    ++session.revision;
+                    response.handled = true;
+                }
+            }
+            response.snapshot.revision = session.revision;
+            return response;
+        }
         if (request.operation == Operation::ProcessKey) {
+            if (session.correction && request.precedingText)
+                engine_.setCorrectionContext(session.engineId, *request.precedingText);
             if (!engine_.processKey(session.engineId, request.keycode, request.modifiers)) {
                 Response response = resultFor(request, Status::Ok);
                 // Rime's ascii_composer can commit/toggle on a modifier release
@@ -107,6 +132,7 @@ Response BrokerConnection::dispatch(const Request& request) {
                 const bool modifier = request.keycode >= 0xffe1 && request.keycode <= 0xffee;
                 if (modifier) ++session.revision;
                 response.snapshot = engine_.snapshot(session.engineId, modifier);
+                restrictCorrectionSnapshot(response.snapshot, session.correction);
                 response.snapshot.revision = session.revision;
                 response.handled = false;
                 return response;
@@ -115,6 +141,7 @@ Response BrokerConnection::dispatch(const Request& request) {
             if (!engine_.selectCandidate(session.engineId, request.candidateIndex)) {
                 Response response = resultFor(request, Status::Ok);
                 response.snapshot = engine_.snapshot(session.engineId, false);
+                restrictCorrectionSnapshot(response.snapshot, session.correction);
                 response.snapshot.revision = session.revision;
                 response.handled = false;
                 return response;
@@ -132,6 +159,7 @@ Response BrokerConnection::dispatch(const Request& request) {
             ++session.revision;
         }
         Snapshot snapshot = engine_.snapshot(session.engineId);
+        restrictCorrectionSnapshot(snapshot, session.correction);
         snapshot.revision = session.revision;
         Response response = resultFor(request, Status::Ok);
         response.snapshot = std::move(snapshot);

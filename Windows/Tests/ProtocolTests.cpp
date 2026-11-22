@@ -250,6 +250,38 @@ int testCandidateAppearance() {
     return 0;
 }
 
+int testCorrectionCodec() {
+    auto create = request(Operation::CreateSession, 1, 0, 4);
+    create.supportsCorrection = true;
+    const auto capabilities = decodeRequest(encodeRequest(create));
+    CHECK(capabilities && capabilities->supportsCorrection);
+    auto key = request(Operation::ProcessKey, 2, 1, 4);
+    key.keycode = 'd';
+    key.precedingText = "下雨了，你有没有";
+    const auto decoded = decodeRequest(encodeRequest(key));
+    CHECK(decoded && decoded->precedingText == key.precedingText);
+    key.precedingText = std::string{};
+    CHECK(decodeRequest(encodeRequest(key))->precedingText.has_value());
+    key.precedingText = std::string(kMaxCorrectionContextBytes + 1, 'x');
+    CHECK(encodeRequest(key).empty());
+    key.precedingText = std::string("x\0y", 3);
+    CHECK(encodeRequest(key).empty());
+    create.precedingText = "test";
+    CHECK(encodeRequest(create).empty());
+
+    auto poll = request(Operation::RefreshCandidates, 3, 1, 4);
+    poll.snapshotRevision = 12;
+    const auto refresh = decodeRequest(encodeRequest(poll));
+    CHECK(refresh && refresh->operation == Operation::RefreshCandidates && refresh->snapshotRevision == 12);
+    Response result;
+    result.id = poll.id;
+    result.snapshot.correctionPending = true;
+    result.snapshot.revision = 12;
+    const auto reply = decodeResponse(encodeResponse(result));
+    CHECK(reply && reply->snapshot.correctionPending && reply->snapshot.revision == 12 && !reply->handled);
+    return 0;
+}
+
 int testDecoderLimits() {
     const std::string prefix = "{\"version\":1,\"connectionEpoch\":77,\"sessionId\":1,\"contextEpoch\":9,\"sequence\":";
     const std::string suffix = ",\"operation\":\"health\",\"payload\":{}}";
@@ -765,6 +797,7 @@ int testBroker() {
 int main() {
     if (const int result = testUnicodeAndCodec(); result != 0) return result;
     if (const int result = testCandidateAppearance(); result != 0) return result;
+    if (const int result = testCorrectionCodec(); result != 0) return result;
     if (const int result = testDecoderLimits(); result != 0) return result;
     if (const int result = testModifierSideEffects(); result != 0) return result;
     if (const int result = testCreateFailureIdentity(); result != 0) return result;

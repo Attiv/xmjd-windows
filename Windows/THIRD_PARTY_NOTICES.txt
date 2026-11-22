@@ -23,6 +23,15 @@ PROVENANCE.json 记录来源、提交、tree、文件 SHA-256 和两个架构的
 
 固定组件与许可证
 
+chinese-ime-lm 上下文纠错模型 — Apache-2.0
+  与 Mac 版相同的模型、元数据和词表映射。
+  完整许可和训练语料署名：Resources/MSIME/LICENSE、Resources/MSIME/NOTICE。
+
+Microsoft ONNX Runtime 1.24.3 CPU 版 — MIT
+  Windows x64 Host 在本地运行纠错模型；x86 前端不直接加载运行库。
+  许可与第三方声明：Resources/MSIME/ONNXRuntime-LICENSE、
+  Resources/MSIME/ONNXRuntime-ThirdPartyNotices.txt。
+
 rime-essay — LGPL-3.0
   d95eeae056df429ecf993038c325a216f0b28c5b
   LiangFen 词典引用的预设词频表，原样提供 essay.txt。

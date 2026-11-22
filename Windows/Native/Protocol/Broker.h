@@ -11,7 +11,12 @@ public:
     BrokerConnection& operator=(const BrokerConnection&) = delete;
     Response dispatch(const Request& request);
 private:
-    struct Session { std::uint64_t engineId; std::uint64_t contextEpoch; std::uint64_t revision = 0; };
+    struct Session {
+        std::uint64_t engineId;
+        std::uint64_t contextEpoch;
+        std::uint64_t revision = 0;
+        bool correction = false;
+    };
     Engine& engine_;
     std::uint64_t epoch_ = 0;
     std::uint64_t lastSequence_ = 0;

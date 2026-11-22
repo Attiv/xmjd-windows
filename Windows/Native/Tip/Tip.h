@@ -38,7 +38,7 @@ struct CandidateSnapshot {
     bool lastPage = true;
 };
 
-enum class EditAction { ProcessKey, SelectCandidate, FinalizeRaw, FinalizeConverted, Cancel, CancelComposition, RecoverComposition, UpdateCandidatePosition };
+enum class EditAction { ProcessKey, SelectCandidate, FinalizeRaw, FinalizeConverted, Cancel, CancelComposition, RecoverComposition, UpdateCandidatePosition, RefreshCandidates };
 
 class XMJDTip;
 class LangBarItem;
@@ -152,6 +152,8 @@ private:
     void retryEngineSession();
     void scheduleEngineRetry();
     void cancelEngineRetry() noexcept;
+    void scheduleCorrectionRefresh(bool pending);
+    void pollCorrection();
     bool applySnapshot(EditSession* edit, TfEditCookie cookie, const xmjd::Snapshot& snapshot);
     bool setCompositionText(EditSession* edit, TfEditCookie cookie, std::wstring_view text, UINT caret);
     bool commitText(EditSession* edit, TfEditCookie cookie, std::wstring_view text);
@@ -202,6 +204,8 @@ private:
     std::uint64_t candidateRevision_ = 0;
     std::wstring acknowledgedRaw_;
     bool engineRetryScheduled_ = false;
+    bool correctionAvailable_ = false;
+    ULONGLONG correctionDeadline_ = 0;
     HWND engineRetryWindow_ = nullptr;
     HWND candidateWindow_ = nullptr;
     bool opaqueCandidatePainted_ = false;
