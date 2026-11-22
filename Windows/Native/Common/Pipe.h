@@ -7,8 +7,7 @@
 
 namespace xmjd::win {
 inline constexpr DWORD kMaxPipeConnections = 32;
-// Shared per-logon name/ACL and token verification. AppContainer clients may
-// connect across integrity levels, with the same user/session/logon checks.
+// Shared per-logon name/ACL and token verification for desktop and packaged apps.
 std::wstring pipeName();
 std::filesystem::path modulePath(HMODULE module = nullptr);
 std::filesystem::path dataRoot();
@@ -17,15 +16,34 @@ std::string narrow(std::wstring_view utf16);
 
 // Server uses overlapped, byte-mode, local-only named pipes with a Low label.
 // The logon SID gets server access, packages get client I/O only; verifyClient
-// checks user/session/logon, rejects restricted tokens and checks desktop IL.
+// checks user/session/logon, token type, and integrity in the client-to-Host direction.
 // Caller owns returned handles.
 HANDLE createServerPipe(bool firstInstance, const std::wstring& name = pipeName());
 // Allow a specific AppContainer to authenticate this server by inspecting its
 // image path and token identity, without granting write or impersonation access.
 DWORD allowPipeServerIdentityQuery(PSID appContainerSid) noexcept;
-// Engine lifecycle requests are reserved for verified desktop clients.
+enum class PipeClientKind { Desktop, AppContainer, Elevated };
+
 struct VerifiedClient {
-    bool appContainer;
+    PipeClientKind kind;
+
+    constexpr bool allows(Operation operation) const noexcept {
+        switch (operation) {
+        case Operation::CreateSession:
+        case Operation::ProcessKey:
+        case Operation::SelectCandidate:
+        case Operation::Finalize:
+        case Operation::Cancel:
+        case Operation::DestroySession:
+            return true;
+        case Operation::Health:
+            return kind != PipeClientKind::Elevated;
+        case Operation::Deploy:
+        case Operation::Shutdown:
+            return kind == PipeClientKind::Desktop;
+        }
+        return false;
+    }
 };
 std::optional<VerifiedClient> verifyClient(HANDLE pipe);
 bool connectServerPipe(HANDLE pipe, HANDLE stopEvent);
@@ -52,10 +70,12 @@ public:
                                      bool control = false);
     void close() noexcept;
     bool connected() const noexcept { return pipe_ != INVALID_HANDLE_VALUE; }
+    bool inputOnly() const noexcept { return inputOnly_; }
     std::uint64_t epoch() const noexcept { return epoch_; }
 private:
     HANDLE pipe_ = INVALID_HANDLE_VALUE;
     std::uint64_t epoch_ = 0;
+    bool inputOnly_ = false;
     const char* connectFailureStage_ = "not-attempted";
     DWORD connectFailureCode_ = ERROR_SUCCESS;
 };

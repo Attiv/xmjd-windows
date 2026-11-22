@@ -230,6 +230,10 @@ errors:   unavailable, busy, stale, unsupportedVersion, invalidRequest, engineFa
   do not use an Everyone-writable endpoint. Input clients cannot submit arbitrary
   paths, launch commands or privileged maintenance operations. Keep maintenance
   endpoints unavailable to restricted input clients.
+- A verified elevated desktop client in the same user, session and logon may
+  connect to the ordinary Host in the protected install directory. It may use
+  input sessions, not engine control operations. Pipe clients provide
+  identification-level security context only; the Host must not act as them.
 
 ### Storage / Dependencies / Installation
 

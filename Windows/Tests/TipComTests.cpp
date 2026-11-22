@@ -5,6 +5,7 @@
 #include <aclapi.h>
 #include <msctf.h>
 #include "../Native/Common/Pipe.h"
+#include "../Native/Common/PipeAccessPolicy.h"
 #include "../Native/Tip/ShiftTap.h"
 #include "../Native/Tip/CandidatePopup.h"
 #include "../Native/Tip/CandidateComposition.h"
@@ -319,7 +320,48 @@ private:
     HANDLE handle_;
 };
 
+bool verifyPipeAuthorization() {
+    using xmjd::Operation;
+    using xmjd::win::PipeClientKind;
+    using xmjd::win::VerifiedClient;
+    using xmjd::win::detail::classifyPipeClient;
+    using xmjd::win::detail::PipeTokenContext;
+
+    constexpr PipeTokenContext desktop{SECURITY_MANDATORY_MEDIUM_RID};
+    constexpr PipeTokenContext elevated{SECURITY_MANDATORY_HIGH_RID, false, false, true};
+    constexpr PipeTokenContext system{SECURITY_MANDATORY_SYSTEM_RID, false, false, true};
+    constexpr PipeTokenContext restricted{SECURITY_MANDATORY_HIGH_RID, true, false, true};
+    constexpr PipeTokenContext low{SECURITY_MANDATORY_LOW_RID};
+    constexpr PipeTokenContext packaged{SECURITY_MANDATORY_LOW_RID, false, true, false};
+    CHECK(classifyPipeClient(desktop, desktop, true) == PipeClientKind::Desktop);
+    CHECK(classifyPipeClient(desktop, elevated, true) == PipeClientKind::Elevated);
+    CHECK(classifyPipeClient(desktop, packaged, true) == PipeClientKind::AppContainer);
+    CHECK(!classifyPipeClient(desktop, elevated, false)); // Another user or logon.
+    CHECK(!classifyPipeClient(desktop, desktop, false));
+    CHECK(!classifyPipeClient(desktop, packaged, false));
+    CHECK(!classifyPipeClient(elevated, desktop, true));
+    CHECK(!classifyPipeClient(elevated, elevated, true));
+    CHECK(!classifyPipeClient(packaged, elevated, true));
+    CHECK(!classifyPipeClient(desktop, system, true));
+    CHECK(!classifyPipeClient(desktop, restricted, true));
+    CHECK(!classifyPipeClient(desktop, low, true));
+    for (const auto op : {Operation::CreateSession, Operation::ProcessKey, Operation::SelectCandidate,
+                          Operation::Finalize, Operation::Cancel, Operation::DestroySession}) {
+        CHECK(VerifiedClient{PipeClientKind::Elevated}.allows(op));
+    }
+    CHECK(!VerifiedClient{PipeClientKind::Elevated}.allows(Operation::Health));
+    for (const auto op : {Operation::Deploy, Operation::Shutdown}) {
+        CHECK(!VerifiedClient{PipeClientKind::Elevated}.allows(op));
+        CHECK(!VerifiedClient{PipeClientKind::AppContainer}.allows(op));
+        CHECK(VerifiedClient{PipeClientKind::Desktop}.allows(op));
+    }
+    CHECK(VerifiedClient{PipeClientKind::AppContainer}.allows(Operation::Health));
+    CHECK(!VerifiedClient{PipeClientKind::Elevated}.allows(static_cast<Operation>(65535)));
+    return true;
+}
+
 bool verifyPipeSecurity() {
+    CHECK(verifyPipeAuthorization());
     const std::wstring name = L"\\\\.\\pipe\\XMJD\\security-test-" +
         std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
     HandleGuard server(xmjd::win::createServerPipe(true, name));
@@ -648,7 +690,8 @@ bool verifyAppContainerPeer() {
                 if (!frame) return;
                 const auto client = xmjd::win::verifyClient(pipe.get());
                 const auto request = xmjd::decodeRequest(*frame);
-                if (!client || !client->appContainer || !request || request->operation != xmjd::Operation::Health) return;
+                if (!client || client->kind != xmjd::win::PipeClientKind::AppContainer ||
+                    !request || request->operation != xmjd::Operation::Health) return;
                 xmjd::Response response;
                 response.id = request->id;
                 response.handled = true;

@@ -1997,6 +1997,9 @@ LRESULT CALLBACK XMJDTip::popupWndProc(HWND window, UINT message, WPARAM wParam,
 // 输入法在 Windows 上没有语言栏按钮，安装完成后如果没记住开始菜单入口，
 // 就再也找不到设置程序；在候选窗上补一个右键菜单作为常驻入口。
 void XMJDTip::showContextMenu(HWND window) {
+    // In elevated applications the channel is for text input only. Do not open
+    // Settings or a user-controlled folder using the game's token.
+    if (!pipe_.connected() || pipe_.inputOnly()) return;
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, kMenuSettings, L"星猫键道设置…");

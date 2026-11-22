@@ -1,6 +1,6 @@
 # 星猫键道 Windows 原生版
 
-星猫键道独立 Windows 版本，当前版本 **0.1.5+26**。采用原生 C++17 TSF 前端，提供 x64/x86 输入法 DLL，由一个 x64 Host 运行 librime。无需安装 Weasel，也不读取或修改 Weasel 的用户目录。
+星猫键道独立 Windows 版本，当前版本 **0.1.5+27**。采用原生 C++17 TSF 前端，提供 x64/x86 输入法 DLL，由一个 x64 Host 运行 librime。无需安装 Weasel，也不读取或修改 Weasel 的用户目录。
 
 ## 下载并安装
 
@@ -8,7 +8,7 @@
 
 公开安装包和 SHA-256 校验值见 [GitHub Releases](https://github.com/Attiv/xmjd-windows/releases)（无需登录）。
 
-1. 下载 `XMJD-0.1.5+26-windows-x64-setup.exe`。支持 Windows 11 x64；不支持 ARM64。
+1. 下载 `XMJD-0.1.5+27-windows-x64-setup.exe`。支持 Windows 11 x64；不支持 ARM64。
 2. 运行安装程序并允许管理员安装。程序自动安装并注册 x64/x86 输入法，无需安装开发工具或执行构建命令。
 3. 安装结束后会以普通用户身份打开**星猫键道设置**。如果窗口没有出现，从开始菜单打开“星猫键道 → 星猫键道设置”。
 4. 在设置里选择输入方案，点击**应用并部署**，等待词典编译完成；需要外部方案或换皮肤，见下面两节。
@@ -17,7 +17,7 @@
 
 安装程序目前没有商业代码签名证书。请从本仓库 Release 下载，并按附件中的 `SHA256SUMS.txt` 核对。Windows 可能显示未知发布者提示。
 
-程序目录：`%ProgramFiles%\XMJD\0.1.5+26`。用户数据独立保存在 `%LOCALAPPDATA%\XMJD`，包括 `SharedData`、`UserData`、`Staging`、`Backups`、`Logs`。正常运行使用普通用户权限；Host 拒绝管理员、受限和 AppContainer 会话。
+程序目录：`%ProgramFiles%\XMJD\0.1.5+27`。用户数据独立保存在 `%LOCALAPPDATA%\XMJD`，包括 `SharedData`、`UserData`、`Staging`、`Backups`、`Logs`。正常运行使用普通用户权限；Host 不以管理员、受限令牌或 AppContainer 身份启动。
 
 ## 设置与方案选择
 
@@ -76,7 +76,7 @@
 新版安装器会尝试卸载旧版本再注册新版，保留用户词库和设置。安装前建议先切到其他输入法并关闭使用星猫键道的应用；若系统界面仍加载旧 DLL，注销后重新登录。若 DLL 丢失或注册不完整，请先切换到其他输入法并退出使用它的应用，再用**同版本**安装包修复。在安装包所在目录的 PowerShell 执行：
 
 ```powershell
-& '.\XMJD-0.1.5+26-windows-x64-setup.exe' /REPAIR
+& '.\XMJD-0.1.5+27-windows-x64-setup.exe' /REPAIR
 ```
 
 修复会核对现有安装的版本、固定目录和注册所有权，从安装包恢复程序文件，再重建双架构注册，保留用户数据。路径中有链接、存在未知文件、安装属于其他版本或所有权不匹配时会拒绝修复；文件仍被占用时先注销或重启再试。修复后可以重新使用或正常卸载。手动开发安装仍使用其 `scripts/unregister.ps1` 注销。不要直接删除仍在注册中的 DLL。
@@ -92,7 +92,7 @@
 
 任务栏只保留 Windows 的输入指示器（输入法标识及中/英模式），不再额外注册 Host 托盘图标。设置仍可从开始菜单打开。
 
-系统搜索和开始菜单走 TSF，Host 只向相关的 Windows 系统包授予核验进程身份所需的查询权限。若应用强制以管理员身份运行（例如部分游戏客户端），星猫键道不会与该提权应用建立输入会话；可切换到 Windows 自带输入法。
+系统搜索和开始菜单走 TSF，Host 只向相关的 Windows 系统包授予核验进程身份所需的查询权限。安装版支持同一 Windows 用户和登录会话中的管理员应用（包括部分游戏客户端）。输入引擎仍以普通权限运行；游戏里的输入法只能打字、选词和上屏，不能部署词库、关闭引擎或打开设置。
 
 公开 CI 的编译、CTest、真实引擎和安装检查可以覆盖自动验证部分；实际 Windows 11 桌面中的 TSF 输入、应用兼容性、候选定位和按键延迟仍需要实机验收。Windows Server runner 的成功不代表所有桌面场景都已通过。
 
@@ -128,7 +128,7 @@ Windows/out/release/                  EXE 安装程序、对应源码及校验�
 单架构构建使用 `-Architecture x64` 或 `x86`；完整交付必须使用默认 `all`。已有同名输出不会覆盖。校验交付支持目录或 ZIP，也可在其他平台的 PowerShell 执行：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\build.ps1 -VerifyPackage ".\Windows\out\package\XMJD-0.1.5+26-windows-x64-x86-Release.zip"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\build.ps1 -VerifyPackage ".\Windows\out\package\XMJD-0.1.5+27-windows-x64-x86-Release.zip"
 ```
 
 开发安装需要管理员的 64 位 PowerShell：

@@ -53,8 +53,8 @@ void logInputResponse(HANDLE pipe, const xmjd::win::VerifiedClient& client,
     if (!GetNamedPipeClientProcessId(pipe, &clientId)) clientId = 0;
     char line[320]{};
     std::snprintf(line, sizeof(line),
-                  "XMJDHost IPC pid=%lu appcontainer=%u op=%s seq=%llu status=%s handled=%u commit=%zuB preedit=%zuB input=%zuB ascii=%u\n",
-                  static_cast<unsigned long>(clientId), client.appContainer ? 1u : 0u,
+                  "XMJDHost IPC pid=%lu client=%u op=%s seq=%llu status=%s handled=%u commit=%zuB preedit=%zuB input=%zuB ascii=%u\n",
+                  static_cast<unsigned long>(clientId), static_cast<unsigned>(client.kind),
                   operationName(request.operation), static_cast<unsigned long long>(request.id.sequence),
                   xmjd::statusName(response.status), response.handled ? 1u : 0u,
                   response.snapshot.commitText.size(), response.snapshot.preedit.size(),
@@ -352,6 +352,10 @@ void connectionWorker(ServerState& state, std::size_t workerIndex) noexcept {
                             response.id = request->id;
                             response.id.version = xmjd::kProtocolVersion;
                             response.status = xmjd::Status::Stale;
+                        } else if (!verifiedClient->allows(request->operation)) {
+                            response.id = request->id;
+                            response.id.version = xmjd::kProtocolVersion;
+                            response.status = xmjd::Status::InvalidRequest;
                         } else if (gate.owns_lock() && request->operation == xmjd::Operation::Deploy) {
                             response.id = request->id;
                             response.id.version = xmjd::kProtocolVersion;
@@ -359,8 +363,6 @@ void connectionWorker(ServerState& state, std::size_t workerIndex) noexcept {
                                 response.status = xmjd::Status::UnsupportedVersion;
                             } else if (request->id.connectionEpoch == 0 || request->id.sessionId != 0 ||
                                        request->id.contextEpoch != 0) {
-                                response.status = xmjd::Status::InvalidRequest;
-                            } else if (verifiedClient->appContainer) {
                                 response.status = xmjd::Status::InvalidRequest;
                             } else if (!state.deploy) {
                                 response.status = xmjd::Status::Unavailable;
@@ -380,7 +382,7 @@ void connectionWorker(ServerState& state, std::size_t workerIndex) noexcept {
                             // initialize 时生效，就地重新部署不会换目录。
                             response.id = request->id;
                             response.id.version = xmjd::kProtocolVersion;
-                            if (verifiedClient->appContainer || request->id.version != xmjd::kProtocolVersion ||
+                            if (request->id.version != xmjd::kProtocolVersion ||
                                 request->id.connectionEpoch == 0 || request->id.sessionId != 0 ||
                                 request->id.contextEpoch != 0) {
                                 response.status = xmjd::Status::InvalidRequest;

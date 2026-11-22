@@ -4,6 +4,7 @@
 #define NOMINMAX
 #endif
 #include "Pipe.h"
+#include "PipeAccessPolicy.h"
 
 #include <aclapi.h>
 #include <sddl.h>
@@ -32,9 +33,7 @@ struct TokenDetails {
     std::vector<std::uint8_t> user;
     std::vector<std::uint8_t> logon;
     DWORD session = 0;
-    DWORD integrity = 0;
-    bool restricted = false;
-    bool appContainer = false;
+    detail::PipeTokenContext context;
 };
 
 class HandleGuard {
@@ -97,17 +96,23 @@ bool readTokenDetails(HANDLE token, TokenDetails& details) {
     label = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(integrity.data());
     if (!label->Label.Sid || *GetSidSubAuthorityCount(label->Label.Sid) == 0) return false;
     const DWORD integrityRid = *GetSidSubAuthority(label->Label.Sid, *GetSidSubAuthorityCount(label->Label.Sid) - 1);
-    BOOL appContainer = FALSE;
-    size = sizeof(appContainer);
-    if (!GetTokenInformation(token, TokenIsAppContainer, &appContainer, size, &size)) return false;
+    // TokenIsAppContainer can return zero for an identification-level token.
+    // Read the package SID itself so that such clients cannot gain control commands.
+    std::vector<std::uint8_t> package;
+    if (!readTokenField(token, TokenAppContainerSid, package) ||
+        package.size() < sizeof(TOKEN_APPCONTAINER_INFORMATION)) return false;
+    const auto packageSid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
+    if (packageSid && !IsValidSid(packageSid)) return false;
+    TOKEN_ELEVATION elevation{};
+    size = sizeof(elevation);
+    if (!GetTokenInformation(token, TokenElevation, &elevation, size, &size)) return false;
     const auto* userSid = reinterpret_cast<const std::uint8_t*>(userInfo->User.Sid);
     const auto* logonSid = reinterpret_cast<const std::uint8_t*>(logonInfo->Groups[0].Sid);
     details.user.assign(userSid, userSid + GetLengthSid(userInfo->User.Sid));
     details.logon.assign(logonSid, logonSid + GetLengthSid(logonInfo->Groups[0].Sid));
     details.session = session;
-    details.integrity = integrityRid;
-    details.restricted = IsTokenRestricted(token) != FALSE;
-    details.appContainer = appContainer != FALSE;
+    details.context = {integrityRid, IsTokenRestricted(token) != FALSE,
+                       packageSid != nullptr, elevation.TokenIsElevated != FALSE};
     return true;
 }
 
@@ -122,19 +127,11 @@ PSID sidPointer(const std::vector<std::uint8_t>& bytes) noexcept {
     return reinterpret_cast<PSID>(const_cast<std::uint8_t*>(bytes.data()));
 }
 
-bool sameTokenBoundary(const TokenDetails& left, const TokenDetails& right) {
-    // Preserve the restricted-token boundary. TokenIsAppContainer is queried
-    // separately; AppContainer and IsTokenRestricted are not equivalent.
-    if (left.restricted || right.restricted) return false;
-    if (left.session != right.session) return false;
-    if (!EqualSid(sidPointer(left.user), sidPointer(right.user))) return false;
-    if (!EqualSid(sidPointer(left.logon), sidPointer(right.logon))) return false;
-    // AppContainer clients can run at Low IL. Require the same user and logon
-    // session above, but do not require their IL to equal the desktop Host's.
-    if (left.appContainer || right.appContainer) return true;
-    return left.integrity >= SECURITY_MANDATORY_MEDIUM_RID &&
-           right.integrity >= SECURITY_MANDATORY_MEDIUM_RID &&
-           left.integrity == right.integrity;
+std::optional<PipeClientKind> classifyClient(const TokenDetails& server, const TokenDetails& client) {
+    const bool sameLogon = server.session != 0 && server.session == client.session &&
+        EqualSid(sidPointer(server.user), sidPointer(client.user)) &&
+        EqualSid(sidPointer(server.logon), sidPointer(client.logon));
+    return detail::classifyPipeClient(server.context, client.context, sameLogon);
 }
 
 std::wstring currentLogonSidString() {
@@ -151,7 +148,8 @@ std::wstring currentLogonSidString() {
 bool makeSecurityAttributes(SECURITY_ATTRIBUTES& attributes, PSECURITY_DESCRIPTOR& descriptor) {
     TokenDetails details;
     if (!currentTokenDetails(details)) return false;
-    if (details.restricted || details.appContainer || details.integrity < SECURITY_MANDATORY_MEDIUM_RID) return false;
+    if (details.context.restricted || details.context.appContainer ||
+        details.context.integrity < SECURITY_MANDATORY_MEDIUM_RID) return false;
     LPWSTR rawSid = nullptr;
     if (!ConvertSidToStringSidW(sidPointer(details.logon), &rawSid)) return false;
     const std::wstring logonSid(rawSid);
@@ -198,7 +196,26 @@ std::wstring processImagePath(HANDLE process) {
     }
 }
 
-bool verifyPeer(HANDLE pipe, const std::filesystem::path& expectedHost,
+bool isProtectedInstallHost(const std::wstring& path) {
+    // Read the native Program Files path even for a WOW64 client. Do not take
+    // it from the game's environment. Elevated TIPs never trust a dev install.
+    wchar_t programFiles[MAX_PATH]{};
+    DWORD bytes = sizeof(programFiles);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion",
+                     L"ProgramFilesDir", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                     nullptr, programFiles, &bytes) != ERROR_SUCCESS) return false;
+    const auto root = fullPath((std::filesystem::path(programFiles) / L"XMJD").wstring());
+    const std::filesystem::path exe(path);
+    const auto install = exe.parent_path();
+    if (root.empty() || install.parent_path().wstring() != root || exe.filename() != L"xmjdhost.exe") return false;
+    for (const auto& component : {std::filesystem::path(root), install, exe}) {
+        const DWORD attributes = GetFileAttributesW(component.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+    }
+    return true;
+}
+
+bool verifyPeer(HANDLE pipe, const std::filesystem::path& expectedHost, bool& inputOnly,
                 const char*& failureStage, DWORD& failureCode) {
     const auto fail = [&](const char* stage, DWORD code) {
         failureStage = stage;
@@ -222,13 +239,17 @@ bool verifyPeer(HANDLE pipe, const std::filesystem::path& expectedHost,
     if (!readTokenDetails(token.get(), peer)) return fail("peer-server-token", GetLastError());
     SetLastError(ERROR_SUCCESS);
     if (!currentTokenDetails(current)) return fail("peer-current-token", GetLastError());
-    if (!sameTokenBoundary(current, peer)) return fail("peer-token-boundary", ERROR_ACCESS_DENIED);
+    const auto kind = classifyClient(peer, current);
+    if (!kind) return fail("peer-token-boundary", ERROR_ACCESS_DENIED);
     SetLastError(ERROR_SUCCESS);
     const std::wstring actual = processImagePath(process.get());
     if (actual.empty()) return fail("peer-image-query", GetLastError());
     const std::wstring expected = fullPath(expectedHost.wstring());
     if (expected.empty()) return fail("peer-expected-path", GetLastError());
     if (actual != expected) return fail("peer-image-mismatch", ERROR_ACCESS_DENIED);
+    if (*kind == PipeClientKind::Elevated && !isProtectedInstallHost(actual))
+        return fail("peer-install-path", ERROR_ACCESS_DENIED);
+    inputOnly = *kind == PipeClientKind::Elevated;
     failureStage = "connected";
     failureCode = ERROR_SUCCESS;
     return true;
@@ -457,8 +478,10 @@ std::optional<VerifiedClient> verifyClient(HANDLE pipe) {
     }
     // 身份验证失败不允许线程继续以客户端身份处理后续引擎操作。
     if (!RevertToSelf()) std::terminate();
-    if (!read || !sameTokenBoundary(current, client)) return std::nullopt;
-    return VerifiedClient{client.appContainer};
+    if (!read) return std::nullopt;
+    const auto kind = classifyClient(current, client);
+    if (!kind) return std::nullopt;
+    return VerifiedClient{*kind};
 }
 
 bool connectServerPipe(HANDLE pipe, HANDLE stopEvent) {
@@ -540,14 +563,16 @@ bool PipeClient::connect(const std::filesystem::path& expectedHost, const std::w
         return false;
     }
     connectFailureStage_ = "pipe-open";
-    HANDLE raw = CreateFileW(name.c_str(), kPipeAccess, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+    // The server needs to identify the client, never to act with its privileges.
+    constexpr DWORD flags = FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
+    HANDLE raw = CreateFileW(name.c_str(), kPipeAccess, 0, nullptr, OPEN_EXISTING, flags, nullptr);
     if (raw == INVALID_HANDLE_VALUE) {
         connectFailureCode_ = GetLastError();
         return false;
     }
     HandleGuard candidate(raw);
     connectFailureStage_ = "peer-verify";
-    if (!verifyPeer(candidate.get(), expectedHost, connectFailureStage_, connectFailureCode_)) {
+    if (!verifyPeer(candidate.get(), expectedHost, inputOnly_, connectFailureStage_, connectFailureCode_)) {
         return false;
     }
     pipe_ = candidate.release();
@@ -591,6 +616,7 @@ void PipeClient::close() noexcept {
         pipe_ = INVALID_HANDLE_VALUE;
     }
     epoch_ = 0;
+    inputOnly_ = false;
 }
 } // namespace xmjd::win
 
