@@ -22,8 +22,8 @@ local function model_scores(context, code)
     local expected = "msime2\t" .. context:get_property("xmjd6_msime_epoch") .. "\t" .. code
     local data = context:get_property("xmjd6_msime_scores")
     local header, body = data:match("^([^\n]+)\n(.*)$")
-    if header ~= expected then return {}, {} end
-    local scores, corrections = {}, {}
+    if header ~= expected then return {}, {}, {} end
+    local scores, corrections, legal = {}, {}, {}
     for row in body:gmatch("[^\n]+") do
         local kind, text, variant, number, gain_value = row:match("^([LC])\t([^\t]+)\t([a-z]+)\t([^\t]+)\t([^\t]+)$")
         local score, gain = tonumber(number), tonumber(gain_value)
@@ -32,10 +32,12 @@ local function model_scores(context, code)
             scores[text] = score
             if kind == "C" then
                 corrections[#corrections + 1] = { text = text, code = variant, score = score, gain = gain }
+            else
+                legal[text] = true
             end
         end
     end
-    return scores, corrections
+    return scores, corrections, legal
 end
 
 local handlers = setmetatable({}, { __mode = "k" })
@@ -247,6 +249,7 @@ local function filter(input, env)
 
     local segment = context.composition and context.composition:back()
     local code = context.input or ""
+    local short = #code == 2
     if not segment or not segment:has_tag("abc")
         or #code < 1 or #code > 6
         or not string.match(code, "^[a-z]+$") then
@@ -254,13 +257,15 @@ local function filter(input, env)
         return
     end
 
-    local contexts = recent_context(context)
-    if context:get_property("xmjd6_context_features_enabled") ~= "1" then
+    if context:get_property("xmjd6_context_features_enabled") ~= "1"
+        or (short and context:get_property("xmjd6_msime_short_request") ~=
+            context:get_property("xmjd6_msime_epoch") .. "\t" .. code) then
         for candidate in input:iter() do yield(candidate) end
         return
     end
 
-    local neural, alternatives = model_scores(context, code)
+    local contexts = recent_context(context)
+    local neural, alternatives, legal = model_scores(context, code)
     env.neural_scores = neural
     if #alternatives == 0 then
         for candidate in input:iter() do yield(candidate) end
@@ -278,8 +283,8 @@ local function filter(input, env)
     local visible, first_legal, baseline = {}, nil, nil
     for position, candidate in ipairs(ordered) do
         visible[candidate.text] = true
-        if candidate.type == "table" or candidate.type == "completion"
-            or candidate.type == "user_table" then
+        if (not short or legal[candidate.text]) and (candidate.type == "table"
+            or (candidate.type == "completion" and not short) or candidate.type == "user_table") then
             first_legal = first_legal or position
             local score = neural[candidate.text]
             if score then baseline = math.max(baseline or score, score) end
@@ -302,12 +307,20 @@ local function filter(input, env)
     end)
     local suggestion
     local best, runner_up = eligible[1], eligible[2]
-    if best and first_legal and neural[ordered[first_legal].text] and baseline then
+    if best and first_legal and (not short or first_legal == 1)
+        and neural[ordered[first_legal].text] and baseline then
         local margin, separation, min_gain = thresholds(context)
         -- Only the top correction is judged: if it was ignored repeatedly, stay quiet
         -- for this code rather than offering the next guess.
         local picks, ignores = read_feedback(env, code, best.text)
         margin = math.max(0, margin - MARGIN_PER_PICK * math.min(picks, MAX_PICK_BONUS))
+        if short then
+            -- The experimental mode keeps a hard confidence floor, even if
+            -- frequent picks lowered the normal threshold through learning.
+            margin = math.max(margin, 4.6)
+            separation = math.max(separation, math.log(2))
+            min_gain = math.max(min_gain, 1.5)
+        end
         if ignores < IGNORES_TO_SUPPRESS and best.score >= baseline + margin and best.gain >= min_gain
             and (not runner_up or best.score - runner_up.score >= separation) then
             suggestion = Candidate(CORRECTION_TYPE, segment.start, segment._end,

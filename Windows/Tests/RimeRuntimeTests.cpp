@@ -166,6 +166,200 @@ void testCorrection(RimeRuntime& runtime, const std::filesystem::path& root, std
     runtime.destroySession(corrected);
 }
 
+void testSingleCharacterCorrection(RimeRuntime& runtime, const std::filesystem::path& root) {
+    const auto session = runtime.createSession();
+    require(runtime.correctionAvailable(session), "单字纠错缺少模型");
+    constexpr auto context = "床前明月";
+    constexpr auto code = "bm"; // 变；与「光」的 gm 相邻。
+    auto prefs = xmjd::CorrectionPreferences{};
+    auto hasCorrection = [](const Snapshot& snapshot) {
+        return std::any_of(snapshot.candidates.begin(), snapshot.candidates.end(),
+            [](const auto& candidate) { return candidate.comment.find("〔纠错〕") != candidate.comment.npos; });
+    };
+    const auto spell = [&](std::string_view input) {
+        Snapshot snapshot;
+        for (const unsigned char c : input) {
+            require(runtime.processKey(session, c, 0), "单字测试码未处理");
+            snapshot = runtime.snapshot(session);
+        }
+        return snapshot;
+    };
+    const auto clear = [&] {
+        runtime.cancel(session);
+        (void)runtime.snapshot(session);
+    };
+    const auto poll = [&] {
+        for (unsigned i = 0; i < 120; ++i) {
+            auto updated = runtime.refreshCandidates(session);
+            if (!updated || !updated->correctionPending) return updated;
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        return std::optional<Snapshot>{};
+    };
+    // A +28 settings file has no single_character entry; two-key behavior stays unchanged.
+    {
+        std::ofstream legacy(root / L"correction.ini", std::ios::binary | std::ios::trunc);
+        legacy << "enabled=1\nstrength=35\nlead_tenths=14\n";
+    }
+    require(!xmjd::loadCorrectionPreferences(root).singleCharacter, "旧设置错误开启单字纠错");
+    runtime.setCorrectionContext(session, context);
+    const auto baseline = spell(code);
+    require(!baseline.correctionPending && !baseline.candidates.empty() && !hasCorrection(baseline) &&
+            !runtime.refreshCandidates(session), "默认关闭的两码纠错干预输入");
+    const auto first = baseline.candidates.front().text;
+    const auto baselineContinued = spell("d");
+    clear();
+
+    prefs.singleCharacter = true;
+    require(xmjd::saveCorrectionPreferences(root, prefs) &&
+            xmjd::loadCorrectionPreferences(root).singleCharacter, "单字纠错开关未持久化");
+    runtime.setCorrectionContext(session, context);
+    const auto early = spell(code);
+    require(early.correctionPending && !hasCorrection(early) && early.commitText.empty() &&
+            !early.candidates.empty() && early.candidates.front().text == first, "第二键未保留普通候选");
+    require(runtime.selectCandidate(session, 0) && runtime.snapshot(session).commitText == first,
+            "停顿计时期间不能直接上屏首选");
+    require(!runtime.refreshCandidates(session), "已上屏后仍有单字纠错结果");
+
+    for (bool refresh : {false, true}) {
+        runtime.setCorrectionContext(session, "今天我在这里测试怎么");
+        const auto reading = spell("dj");
+        require(reading.correctionPending && !reading.candidates.empty() &&
+                reading.candidates.front().text == "读", "两码纠错改变了 dj 的普通首选");
+        if (refresh) {
+            const auto updated = poll();
+            require(updated && updated->commitText.empty() && !updated->candidates.empty() &&
+                    updated->candidates.front().text == "读", "候选刷新后 dj 丢失普通首选");
+        }
+        require(runtime.processKey(session, 0x20, 0) && runtime.snapshot(session).commitText == "读",
+                "开启两码纠错后 dj 加空格没有上屏「读」");
+        require(!runtime.refreshCandidates(session), "空格上屏以后仍有待处理的两码结果");
+    }
+
+    runtime.setCorrectionContext(session, context);
+    require(spell(code).correctionPending, "两码未开始停顿计时");
+    const auto continued = spell("d");
+    require(continued.rawInput != code && !hasCorrection(continued) &&
+            continued.rawInput == baselineContinued.rawInput &&
+            continued.commitText == baselineContinued.commitText &&
+            !runtime.refreshCandidates(session), "继续输入时应用了旧两码结果，或改变了原顶屏行为");
+    clear();
+
+    const auto suggestMoon = [&] {
+        runtime.setCorrectionContext(session, "举头望明");
+        const auto started = std::chrono::steady_clock::now();
+        const auto original = spell("gh"); // 该；与「月」的 yh 相邻。
+        const auto suggested = poll();
+        require(suggested && suggested->rawInput == "gh" && suggested->commitText.empty() &&
+                !original.candidates.empty() && suggested->candidates.size() >= 2 &&
+                suggested->candidates[0].text == original.candidates[0].text &&
+                suggested->candidates[1].text == "月" &&
+                suggested->candidates[1].comment.find("〔纠错〕") != std::string::npos,
+                "单字纠错没有作为次选出现、改变了首选或自动上屏；" + describe(suggested.value_or(Snapshot{})));
+        require(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(200),
+                "两码停顿计时未生效");
+    };
+    suggestMoon();
+    const auto afterSuggestion = spell("d");
+    require(afterSuggestion.rawInput != "gh" && !hasCorrection(afterSuggestion) &&
+            afterSuggestion.commitText != "月" && !runtime.refreshCandidates(session), "显示后继续输入未撤销旧纠错");
+    clear();
+    suggestMoon();
+    require(runtime.selectCandidate(session, 1) && runtime.snapshot(session).commitText == "月", "两码纠错无法选择上屏");
+    std::cout << "Single-character correction: gh suggested 月 after a pause, without changing the first candidate." << std::endl;
+    runtime.setCorrectionContext(session, "一行白鹭上青");
+    require(spell("gm").correctionPending, "单字低置信测试没有进入推理");
+    const auto uncertain = poll();
+    require(uncertain && !hasCorrection(*uncertain) && uncertain->commitText.empty(),
+            "把握不足时仍提示了单字纠错");
+    clear();
+    runtime.setCorrectionContext(session, "");
+    require(!spell(code).correctionPending && !runtime.refreshCandidates(session), "没有前文时仍启动两码纠错");
+    runtime.destroySession(session);
+}
+
+void testExternalSource(const std::filesystem::path& hostDirectory) {
+    const TemporaryDirectory temporary;
+    const auto source = temporary.path() / L"selected scheme";
+    const auto root = temporary.path() / L"app data";
+    const auto write = [](const std::filesystem::path& path, std::string_view contents) {
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+        stream << contents;
+        require(static_cast<bool>(stream), "不能创建外部方案测试文件");
+    };
+    write(root / "settings.ini", "schema=external_probe\nscheme_source=" + source.u8string() + "\n");
+    const auto oldUser = root / "UserData/Rime";
+    write(oldUser / "default.custom.yaml", "patch:\n  ascii_composer/switch_key/Shift_L: noop\n");
+    write(oldUser / "lua/probe/main.lua", "error('must never use the old profile Lua')\n");
+    write(source / "default.yaml",
+        "config_version: '1'\nschema_list:\n  - schema: external_probe\n"
+        "ascii_composer:\n  switch_key:\n    Shift_L: noop\n    Shift_R: noop\n");
+    write(source / "default.custom.yaml", "patch:\n  ascii_composer/switch_key:\n    Shift_L: commit_code\n");
+    write(source / "external_probe.schema.yaml",
+        "schema:\n  schema_id: external_probe\n  name: External probe\n  version: '1'\n"
+        "engine:\n  processors: [ascii_composer, 'lua_processor@*probe.main', speller, selector, express_editor]\n"
+        "  segmentors: [abc_segmentor, fallback_segmentor]\n  translators: [table_translator]\n"
+        "translator:\n  dictionary: external_probe\n");
+    write(source / "external_probe.dict.yaml",
+        "---\nname: external_probe\nversion: '1'\nsort: original\n...\n外\ta\n");
+    write(source / "essay.txt", "外\t1\n");
+    write(source / "build/default.yaml", "stale source cache must not be deployed\n");
+    write(source / "opencc/probe.dat", "selected-data");
+    write(source / "lua/probe/main.lua",
+        "return function(key, env)\n"
+        "  if key:repr() ~= 'F8' then return 2 end\n"
+        "  local dir = rime_api.get_user_data_dir()\n"
+        "  local f = assert(io.open(dir .. '/opencc/probe.dat', 'rb'))\n"
+        "  local data = f:read('*a'); f:close()\n"
+        "  env.engine:commit_text(require('probe.label') .. ':' .. data)\n"
+        "  return 1\nend\n");
+    write(source / "lua/probe/label.lua", "return 'selected-lua'\n");
+    write(source / "lua/probe/removed.lua", "return 'stale'\n");
+    write(source / "installation.yaml", "installation_id: source-must-not-change\n");
+    const auto timestamp = std::filesystem::last_write_time(source / "installation.yaml");
+
+    const DataLock lock(root);
+    RimeRuntime runtime(hostDirectory, root);
+    int error = 0;
+    const bool initialized = runtime.initialize(false, error);
+    require(initialized, "外部 Rime 源首次部署失败：" + std::to_string(error));
+    const auto verify = [&](bool toggle, std::string_view luaResult) {
+        const auto session = runtime.createSession();
+        require(session != 0 && !runtime.snapshot(session).asciiMode, "外部会话未初始化为中文");
+        require(runtime.processKey(session, 0xffc5, 0) &&
+                runtime.snapshot(session).commitText == luaResult, "外部 Lua 或相对资源没有加载");
+        require(runtime.processKey(session, 'a', 0), "外部词典编码没有处理");
+        const auto word = runtime.snapshot(session);
+        require(!word.candidates.empty() && word.candidates.front().text == "外", "外部词典没有加载");
+        (void)runtime.processKey(session, xmjd::kLeftShiftKey, xmjd::kShiftTapMask);
+        const auto shifted = runtime.snapshot(session);
+        require(shifted.asciiMode == toggle && shifted.commitText == (toggle ? "a" : ""),
+                "外部 default.custom.yaml 的 Shift 覆盖未生效；" + describe(shifted));
+        runtime.destroySession(session);
+    };
+    verify(true, "selected-lua:selected-data");
+
+    // Delete a source file and change a Lua dependency without modifying either
+    // the built-in user profile or this source's base default.yaml.
+    std::filesystem::remove(source / "lua/probe/removed.lua");
+    write(source / "default.custom.yaml", "patch:\n  ascii_composer/switch_key/Shift_L: noop\n");
+    write(source / "opencc/probe.dat", "new-data");
+    write(source / "lua/probe/label.lua",
+          "assert(not pcall(require, 'probe.removed')); return 'updated-lua'\n");
+    const bool redeployed = runtime.redeploy(error);
+    require(redeployed, "外部 Rime 源重新部署失败：" + std::to_string(error));
+    verify(false, "updated-lua:new-data");
+    require(std::filesystem::last_write_time(source / "installation.yaml") == timestamp &&
+            !std::filesystem::exists(source / "user.yaml"), "部署写入了外部方案原目录");
+    require(!std::filesystem::exists(root / "SharedData/Rime"), "外部模式发布了内置资源");
+
+    write(root / "settings.ini", "schema=external_probe\nscheme_source=" + (source / "missing").u8string() + "\n");
+    require(!runtime.redeploy(error) && error == 11 &&
+            !std::filesystem::exists(root / "SharedData/Rime"), "无效外部目录悄悄回退到内置方案");
+    std::cout << "External source: custom Shift, Lua and its data, stale-file removal, and no built-in fallback passed." << std::endl;
+}
+
 void testRuntime(const std::filesystem::path& hostDirectory, const std::filesystem::path& root,
                  std::string& stage) {
     const DataLock lock(root);
@@ -301,6 +495,8 @@ void testRuntime(const std::filesystem::path& hostDirectory, const std::filesyst
     stage = "使用 Mac 原模型修正邻键误按";
     // The bundled dictionary has 岱山 at dhef; the Mac demo uses a newer dictionary.
     testCorrection(runtime, root, "dhef");
+    stage = "两码单字：默认关闭、等待期间可上屏、第三键撤回和停顿后提示";
+    testSingleCharacterCorrection(runtime, root);
 
     stage = "切换拼音方案、重新部署并验证真实拼音候选";
     {
@@ -375,12 +571,38 @@ int wmain(int argc, wchar_t** argv) {
             int error = 0;
             const bool initialized = runtime.initialize(false, error);
             require(initialized, "外部测试方案部署失败: " + std::to_string(error));
+            stage = "外部 JD6：验证 msc 首选、上屏，以及来自源目录的 Shift 补丁";
+            const auto session = runtime.createSession();
+            require(session != 0, "无法创建 JD6 会话");
+            for (unsigned char key : std::string_view("msc")) {
+                require(runtime.processKey(session, key, 0), "JD6 未处理 msc");
+                (void)runtime.snapshot(session);
+            }
+            const auto choices = runtime.snapshot(session);
+            // JD6's eng_space option may pad English candidates on both sides.
+            const auto isMac = [](std::string_view text) {
+                const auto first = text.find_first_not_of(' ');
+                return first != text.npos && text.substr(first, text.find_last_not_of(' ') - first + 1) == "MAC";
+            };
+            require(!choices.candidates.empty() && isMac(choices.candidates.front().text),
+                    "JD6 的 msc 首选不是 MAC；" + describe(choices));
+            require(runtime.processKey(session, ' ', 0) && isMac(runtime.snapshot(session).commitText),
+                    "JD6 的 msc 加空格未上屏 MAC");
+            (void)runtime.processKey(session, 'n', 0);
+            (void)runtime.snapshot(session);
+            (void)runtime.processKey(session, xmjd::kLeftShiftKey, xmjd::kShiftTapMask);
+            const auto shift = runtime.snapshot(session);
+            require(shift.asciiMode && shift.commitText == "n", "JD6 的左 Shift 没有提交编码并切换英文");
+            runtime.destroySession(session);
+            std::cout << "JD6: msc committed MAC and Left Shift committed the code and switched to ASCII." << std::endl;
             stage = "外部 JD6：按当前词库将纠错强度调到 90 后测试 Mac 的 dhsd 示例";
             testCorrection(runtime, temporary.path(), "dhsd", 90);
             require(std::filesystem::last_write_time(external / L"xmjd6.schema.yaml") == before,
                     "外部方案的 schema 不应被修改");
         } else {
             testRuntime(hostDirectory, temporary.path(), stage);
+            stage = "隔离外部 Rime 目录、自定义补丁和 Lua 的重新部署";
+            testExternalSource(hostDirectory);
         }
         return 0;
     } catch (const std::exception& error) {

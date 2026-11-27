@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cwctype>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -101,15 +102,48 @@ std::string utf8(const std::filesystem::path& path) {
     return std::string(reinterpret_cast<const char*>(value.data()), value.size());
 }
 
-bool copyResources(const std::filesystem::path& source, const std::filesystem::path& destination) {
+// These are local state or compiled output, never scheme inputs. Limit the
+// rule to the root so, for example, lua/zzc and OpenCC data are copied intact.
+bool runtimeEntry(std::wstring_view name) {
+    return name == L"installation.yaml" || name == L"user.yaml" || name == L"sync" ||
+           name == L"backups" || name == L"trash" ||
+           name.find(L".userdb") != name.npos || name.rfind(L"typing_stats.txt", 0) == 0 ||
+           name.rfind(L"runtime_undo.tsv", 0) == 0;
+}
+
+bool zzcRuntimeFile(std::wstring_view name) {
+    return name.rfind(L"runtime_ops", 0) == 0 || name.rfind(L"runtime_exact.tsv", 0) == 0 ||
+           name.rfind(L"effective_state.tsv", 0) == 0 || name.rfind(L"cache_version", 0) == 0 ||
+           name.rfind(L"zzc_reset_seen.tsv", 0) == 0;
+}
+
+enum class ResourceCopy { Complete, ExternalSource, RuntimeState };
+
+bool copyResources(const std::filesystem::path& source, const std::filesystem::path& destination,
+                   ResourceCopy mode = ResourceCopy::Complete) {
     std::error_code ec;
-    if (!hasDirectory(source) || !std::filesystem::create_directories(destination, ec) || ec) return false;
+    if (!hasDirectory(source)) return false;
+    std::filesystem::create_directories(destination, ec);
+    if (ec) return false;
 
     for (std::filesystem::recursive_directory_iterator it(source, ec), end; it != end && !ec; it.increment(ec)) {
+        if (mode != ResourceCopy::Complete && (!it.depth() ||
+            (it.depth() == 1 && it->path().parent_path().filename() == L"zzc_state"))) {
+            auto name = it->path().filename().wstring();
+            std::transform(name.begin(), name.end(), name.begin(), [](wchar_t c) { return std::towlower(c); });
+            const bool state = it.depth() ? zzcRuntimeFile(name) : runtimeEntry(name);
+            const bool skip = mode == ResourceCopy::RuntimeState ? !state && (it.depth() || name != L"zzc_state") :
+                state || (!it.depth() && (name == L"build" || name == L".git" || name == L"graphify-out"));
+            if (skip) {
+                it.disable_recursion_pending();
+                continue;
+            }
+        }
         const auto status = it->symlink_status(ec);
-        if (ec || std::filesystem::is_symlink(status)) return false;
-        const auto relative = std::filesystem::relative(it->path(), source, ec);
-        if (ec || relative.empty() || relative.is_absolute()) return false;
+        const auto attributes = GetFileAttributesW(it->path().c_str());
+        if (ec || attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+        const auto relative = it->path().lexically_relative(source);
+        if (relative.empty() || relative.is_absolute()) return false;
         const auto target = destination / relative;
         if (std::filesystem::is_directory(status)) {
             std::filesystem::create_directories(target, ec);
@@ -122,6 +156,45 @@ bool copyResources(const std::filesystem::path& source, const std::filesystem::p
         if (ec) return false;
     }
     return !ec;
+}
+
+std::filesystem::path externalProfile(const std::filesystem::path& root, const std::filesystem::path& source) {
+    // Stable, filesystem-safe profile ID; path equality is case-insensitive on Windows.
+    std::uint64_t hash = 14695981039346656037ull;
+    for (const wchar_t c : source.native()) {
+        hash ^= static_cast<std::uint64_t>(std::towlower(c));
+        hash *= 1099511628211ull;
+    }
+    return root / L"UserData" / L"ExternalRime" / std::to_wstring(hash);
+}
+
+bool publishExternalSource(const std::filesystem::path& source, const std::filesystem::path& target) {
+    const auto profile = target.parent_path();
+    const auto next = profile / L"Incoming";
+    const auto previous = profile / L"Previous";
+    std::error_code ec;
+    // Recover the last completed snapshot if publication was interrupted.
+    if (hasDirectory(previous)) {
+        if (hasDirectory(target)) {
+            std::filesystem::remove_all(previous, ec);
+        } else {
+            std::filesystem::rename(previous, target, ec);
+        }
+        if (ec) return false;
+    }
+    std::filesystem::remove_all(next, ec);
+    if (ec || !copyResources(source, next, ResourceCopy::ExternalSource)) return false;
+    if (hasDirectory(target)) {
+        if (!copyResources(target, next, ResourceCopy::RuntimeState)) return false;
+        std::filesystem::rename(target, previous, ec);
+        if (ec) return false;
+    }
+    std::filesystem::rename(next, target, ec);
+    if (ec) {
+        if (hasDirectory(previous)) std::filesystem::rename(previous, target, ec);
+        return false;
+    }
+    return true;
 }
 
 bool validateResourceTree(const std::filesystem::path& directory) {
@@ -241,6 +314,13 @@ RimeRuntime::RimeRuntime(std::filesystem::path executableDirectory, std::filesys
     : executableDirectory_(std::move(executableDirectory)), rootDirectory_(std::move(dataDirectory)) {}
 
 RimeRuntime::~RimeRuntime() {
+    stopRime();
+    if (library_) FreeLibrary(library_);
+}
+
+void RimeRuntime::stopRime() noexcept {
+    ready_ = false;
+    correctionSchemas_.clear();
     ready_ = false;
     if (api_) {
         for (auto& entry : sessions_) {
@@ -250,8 +330,6 @@ RimeRuntime::~RimeRuntime() {
         if (initialized_) api_->finalize();
     }
     initialized_ = false;
-    api_ = nullptr;
-    if (library_) FreeLibrary(library_);
 }
 
 bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
@@ -267,10 +345,24 @@ bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
         backupDirectory_ = rootDirectory_ / L"Backups";
         const auto logDirectory = rootDirectory_ / L"Logs";
         std::error_code ec;
-        // 选了「方案来源」就直接用那个目录，不再发布副本。
+        const auto configuredSource = readSettingsValue("scheme_source");
         std::filesystem::path externalSource;
-        const bool usingExternalSource = resolveSchemeSource(sharedDirectory_, externalSource);
-        if (usingExternalSource) sharedDirectory_ = externalSource;
+        usingExternalSource_ = !configuredSource.empty();
+        if (usingExternalSource_) {
+            if (!resolveSchemeSource(configuredSource, externalSource)) {
+                errorCode = kRuntimeErrorResources;
+                return false;
+            }
+            // Both Rime's custom patch resolver and scheme Lua that calls
+            // get_user_data_dir() must see the selected source, not the built-in profile.
+            userDirectory_ = externalProfile(rootDirectory_, externalSource) / L"Rime";
+            if (!publishExternalSource(externalSource, userDirectory_)) {
+                errorCode = kRuntimeErrorResources;
+                return false;
+            }
+            sharedDirectory_ = userDirectory_;
+        }
+        compiledDirectory_ = usingExternalSource_ ? userDirectory_ / L"build" : stagingDirectory_ / L"Rime";
         for (const auto& directory : {sharedDirectory_.parent_path(), userDirectory_,
                                       stagingDirectory_, backupDirectory_, logDirectory}) {
             std::filesystem::create_directories(directory, ec);
@@ -281,17 +373,16 @@ bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
         }
         sharedDirectoryUtf8_ = utf8(sharedDirectory_);
         userDirectoryUtf8_ = utf8(userDirectory_);
-        stagingDirectoryUtf8_ = utf8(stagingDirectory_ / L"Rime");
+        stagingDirectoryUtf8_ = utf8(compiledDirectory_);
         logDirectoryUtf8_ = utf8(logDirectory);
-        std::filesystem::create_directories(stagingDirectory_ / L"Rime", ec);
+        std::filesystem::create_directories(compiledDirectory_, ec);
+        if (ec) { errorCode = kRuntimeErrorPaths; return false; }
         const auto journal = stagingDirectory_ / L"resource-deploy.journal";
         bool recoveredInitialDeploy = false;
         const auto deployMarker = stagingDirectory_ / L".xmjd-deploy-pending";
         const bool settingsDeployPending = hasFile(deployMarker);
         bool pendingInitialDeploy = false;
-        if (usingExternalSource) {
-            // 外部方案目录：不发布、不写标记，也不在里面留任何文件。
-            // 首次使用（或换了目录）整份重新编译一次。
+        if (usingExternalSource_) {
             pendingInitialDeploy = true;
         } else {
             if (!hasFile(journal) && !hasFile(stagingDirectory_ / L".xmjd-resource-pending") &&
@@ -307,7 +398,7 @@ bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
                 hasFile(stagingDirectory_ / L".xmjd-resource-pending") || settingsDeployPending;
             if (!publishResources(explicitDeploy, pendingInitialDeploy, errorCode)) return false;
         }
-        if (!loadLibrary(errorCode)) return false;
+        if (!api_ && !loadLibrary(errorCode)) return false;
 
         RIME_STRUCT_INIT(RimeTraits, traits_);
         traits_.shared_data_dir = sharedDirectoryUtf8_.c_str();
@@ -337,22 +428,21 @@ bool RimeRuntime::initialize(bool explicitDeploy, int& errorCode) {
             return false;
         }
         if (pendingInitialDeploy) {
-            if (!usingExternalSource && !writeFile(sharedDirectory_ / L".xmjd-resource-ready", "xmjd6\n")) {
+            if (!usingExternalSource_ && !writeFile(sharedDirectory_ / L".xmjd-resource-ready", "xmjd6\n")) {
                 errorCode = kRuntimeErrorResources;
                 return false;
             }
-            if (!DeleteFileW((stagingDirectory_ / L".xmjd-resource-pending").c_str()) &&
+            if (!usingExternalSource_ && !DeleteFileW((stagingDirectory_ / L".xmjd-resource-pending").c_str()) &&
                 GetLastError() != ERROR_FILE_NOT_FOUND) {
                 errorCode = kRuntimeErrorJournal;
                 return false;
             }
-            const auto journal = stagingDirectory_ / L"resource-deploy.journal";
-            if (hasFile(journal) && !DeleteFileW(journal.c_str())) {
+            if (!usingExternalSource_ && hasFile(journal) && !DeleteFileW(journal.c_str())) {
                 errorCode = kRuntimeErrorJournal;
                 return false;
             }
             std::error_code cleanupError;
-            std::filesystem::remove_all(stagingDirectory_ / L"ResourceDeploy", cleanupError);
+            if (!usingExternalSource_) std::filesystem::remove_all(stagingDirectory_ / L"ResourceDeploy", cleanupError);
             if (cleanupError) {
                 errorCode = kRuntimeErrorResources;
                 return false;
@@ -548,21 +638,24 @@ std::vector<std::pair<std::string, std::string>> RimeRuntime::schemaList() {
 
 bool RimeRuntime::validateSchemas(int& errorCode) {
     const auto schemas = schemaList();
-    if (schemas.empty() || std::none_of(schemas.begin(), schemas.end(), [](const auto& item) { return item.first == "xmjd6"; })) {
+    if (schemas.empty() || (!usingExternalSource_ &&
+        std::none_of(schemas.begin(), schemas.end(), [](const auto& item) { return item.first == "xmjd6"; }))) {
         errorCode = kRuntimeErrorSchema;
         return false;
     }
     const RimeSessionId probe = api_->create_session();
     if (!probe) { errorCode = kRuntimeErrorSession; return false; }
-    // Only the bundled scheme and the active selection are hard requirements.
-    // An imported third-party scheme that fails to compile must not make the
-    // whole engine unavailable; it is recorded in Logs\schema-skipped.log.
+    // Only the main built-in schema (in built-in mode) and the active
+    // selection are required; optional broken schemas are logged.
     const std::string selected = readSettingsSchema();
-    bool valid = true;
+    bool valid = true, healthy = false;
     std::vector<std::string> skipped;
     for (const auto& schema : schemas) {
-        if (api_->select_schema(probe, schema.first.c_str()) && sessionHealthy(probe, schema.first.c_str())) continue;
-        if (schema.first == "xmjd6" || (!selected.empty() && schema.first == selected)) {
+        if (api_->select_schema(probe, schema.first.c_str()) && sessionHealthy(probe, schema.first.c_str())) {
+            healthy = true;
+            continue;
+        }
+        if ((!usingExternalSource_ && schema.first == "xmjd6") || schema.first == selected) {
             valid = false;
             break;
         }
@@ -580,8 +673,8 @@ bool RimeRuntime::validateSchemas(int& errorCode) {
             }
         }
     }
-    if (!valid) errorCode = kRuntimeErrorSchema;
-    return valid;
+    if (!valid || !healthy) errorCode = kRuntimeErrorSchema;
+    return valid && healthy;
 }
 
 std::filesystem::path RimeRuntime::settingsPath() const {
@@ -606,13 +699,19 @@ std::string RimeRuntime::readSettingsValue(std::string_view key) const {
     return {};
 }
 
-// 「方案来源」：用户在设置里选了目录，就直接把这个目录当作 Rime 的共享数据目录，
-// 不再复制副本。这样选哪个就是哪个，字典改了重开一次引擎就跟着变。
-bool RimeRuntime::resolveSchemeSource(const std::filesystem::path& bundled, std::filesystem::path& resolved) const {
-    const std::string configured = readSettingsValue("scheme_source");
-    if (configured.empty()) return false;
+bool RimeRuntime::resolveSchemeSource(std::string_view configured, std::filesystem::path& resolved) const {
     std::error_code ec;
-    const auto candidate = std::filesystem::path(widen(configured));
+    const auto configuredPath = std::filesystem::path(widen(configured));
+    if (!configuredPath.is_absolute()) return false;
+    const auto candidate = std::filesystem::canonical(configuredPath, ec);
+    if (ec) return false;
+    const auto owned = std::filesystem::weakly_canonical(rootDirectory_, ec);
+    if (ec) return false;
+    const auto overlaps = std::mismatch(candidate.begin(), candidate.end(), owned.begin(), owned.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return CompareStringOrdinal(lhs.c_str(), -1, rhs.c_str(), -1, TRUE) == CSTR_EQUAL;
+        });
+    if (overlaps.first == candidate.end() || overlaps.second == owned.end()) return false;
     if (!std::filesystem::is_directory(candidate, ec)) return false;
     if (!std::filesystem::is_regular_file(candidate / L"default.yaml", ec)) return false;
     bool hasSchema = false;
@@ -626,7 +725,6 @@ bool RimeRuntime::resolveSchemeSource(const std::filesystem::path& bundled, std:
     }
     if (!hasSchema) return false;
     resolved = candidate;
-    (void)bundled;
     return true;
 }
 
@@ -678,6 +776,10 @@ bool RimeRuntime::sessionHealthy(RimeSessionId session, const char* expectedSche
 
 bool RimeRuntime::redeploy(int& errorCode) {
     errorCode = 0;
+    if (usingExternalSource_ || !readSettingsValue("scheme_source").empty()) {
+        stopRime();
+        return initialize(true, errorCode);
+    }
     if (!initialized_ || !api_) {
         errorCode = kRuntimeErrorDeployment;
         return false;
@@ -846,7 +948,7 @@ void RimeRuntime::prepareCorrection() noexcept {
         if (!RIME_API_AVAILABLE(api_, set_property) || !RIME_API_AVAILABLE(api_, get_property) ||
             !hasFile(resources / L"model.ort") || !hasFile(resources / L"vocab.tsv") ||
             !hasFile(resources / L"onnxruntime.dll")) return;
-        correctionSchemas_ = correction::installHooks(stagingDirectory_ / L"Rime", sharedDirectory_, userDirectory_, resources);
+        correctionSchemas_ = correction::installHooks(compiledDirectory_, sharedDirectory_, userDirectory_, resources);
         if (!correctionSchemas_.empty() && !correctionWorker_)
             correctionWorker_ = std::make_unique<correction::Worker>(resources);
     } catch (...) {
@@ -872,8 +974,10 @@ void RimeRuntime::setCorrectionContext(std::uint64_t session, std::string_view t
     try {
         const auto p = loadCorrectionPreferences(rootDirectory_);
         state->precedingText = p.enabled ? correction::trailingContext(text) : std::string{};
+        cancelShortCorrection(*state);
         state->pendingPool.clear();
         state->correction = {};
+        state->singleCharacter = p.enabled && p.singleCharacter;
         api_->set_property(state->id, "xmjd6_msime_epoch", std::to_string(++state->correctionEpoch).c_str());
         api_->set_property(state->id, "xmjd6_msime_scores", "");
         api_->set_property(state->id, "xmjd6_msime_strength", std::to_string(p.strength).c_str());
@@ -884,6 +988,7 @@ void RimeRuntime::setCorrectionContext(std::uint64_t session, std::string_view t
         const auto prefix = "\x01" + state->precedingText;
         api_->set_property(state->id, "xmjd6_before_cursor", prefix.c_str());
     } catch (...) {
+        cancelShortCorrection(*state);
         state->precedingText.clear();
         state->pendingPool.clear();
         state->correction = {};
@@ -891,26 +996,66 @@ void RimeRuntime::setCorrectionContext(std::uint64_t session, std::string_view t
     }
 }
 
+namespace {
+constexpr ULONGLONG kShortCorrectionPauseMs = 250;
+}
+
+bool RimeRuntime::correctionEligible(const Session& state, const Snapshot& snapshot) const noexcept {
+    return correctionWorker_ && snapshot.correctionAvailable && !state.precedingText.empty() && !snapshot.asciiMode &&
+           snapshot.page == 0 && snapshot.highlightedIndex == 0 &&
+           correction::validCode(snapshot.rawInput) && !snapshot.candidates.empty() &&
+           (snapshot.rawInput.size() != 2 || state.singleCharacter);
+}
+
+void RimeRuntime::cancelShortCorrection(Session& state) noexcept {
+    if (state.shortCode.empty()) return;
+    state.shortCode.clear();
+    state.shortReadyAt = 0;
+    state.pendingPool.clear();
+    state.correction = {};
+    api_->set_property(state.id, "xmjd6_msime_short_request", "");
+}
+
+bool RimeRuntime::submitCorrectionPool(Session& state, std::string_view rawInput) {
+    char text[16'384]{};
+    if (!api_->get_property(state.id, "xmjd6_msime_pool", text, sizeof(text))) return false;
+    const std::string_view pool(text);
+    const auto header = "msime2\t" + std::to_string(state.correctionEpoch) + "\t" + std::string(rawInput) + "\n";
+    if (pool.substr(0, header.size()) != header) return false;
+    if (state.pendingPool != pool) {
+        state.pendingPool.assign(pool);
+        state.correction = correctionWorker_->submit(state.precedingText, state.pendingPool);
+    }
+    return state.correction.valid();
+}
+
 void RimeRuntime::queueCorrection(Session& state, Snapshot& snapshot) noexcept {
     try {
-        if (!correctionWorker_ || state.precedingText.empty() || snapshot.asciiMode ||
-            snapshot.page || snapshot.highlightedIndex || !correction::validCode(snapshot.rawInput) ||
-            snapshot.candidates.empty()) {
+        if (!correctionEligible(state, snapshot)) {
+            cancelShortCorrection(state);
             state.correction = {};
             state.pendingPool.clear();
             return;
         }
-        char text[16'384]{};
-        if (!api_->get_property(state.id, "xmjd6_msime_pool", text, sizeof(text))) return;
-        const std::string_view pool(text);
-        const auto header = "msime2\t" + std::to_string(state.correctionEpoch) + "\t" + snapshot.rawInput + "\n";
-        if (pool.substr(0, header.size()) != header) return;
-        if (state.pendingPool != pool) {
-            state.pendingPool.assign(pool);
-            state.correction = correctionWorker_->submit(state.precedingText, state.pendingPool);
+        if (snapshot.rawInput.size() == 2) {
+            if (state.shortCode != snapshot.rawInput) {
+                cancelShortCorrection(state);
+                state.pendingPool.clear();
+                state.correction = {};
+                state.shortCode = snapshot.rawInput;
+                state.shortReadyAt = GetTickCount64() + kShortCorrectionPauseMs;
+            }
+            if (state.shortReadyAt) {
+                // Don't run neighbour queries on the second letter's key path.
+                snapshot.correctionPending = true;
+                return;
+            }
+        } else {
+            cancelShortCorrection(state);
         }
-        snapshot.correctionPending = state.correction.valid();
+        snapshot.correctionPending = submitCorrectionPool(state, snapshot.rawInput);
     } catch (...) {
+        cancelShortCorrection(state);
         state.correction = {};
         state.pendingPool.clear();
     }
@@ -918,8 +1063,26 @@ void RimeRuntime::queueCorrection(Session& state, Snapshot& snapshot) noexcept {
 
 std::optional<Snapshot> RimeRuntime::refreshCandidates(std::uint64_t session) {
     auto* state = findSession(session);
-    if (!state || !state->correction.valid()) return std::nullopt;
+    if (!state || !ready_ || !api_->find_session(state->id)) return std::nullopt;
     try {
+        if (state->shortReadyAt) {
+            if (GetTickCount64() < state->shortReadyAt) {
+                Snapshot waiting;
+                waiting.correctionPending = true;
+                return waiting;
+            }
+            const auto current = snapshot(session, false);
+            if (!correctionEligible(*state, current) || current.rawInput != state->shortCode) {
+                cancelShortCorrection(*state);
+                return std::nullopt;
+            }
+            state->shortReadyAt = 0;
+            api_->set_property(state->id, "xmjd6_msime_pool", "");
+            const auto gate = std::to_string(state->correctionEpoch) + "\t" + state->shortCode;
+            api_->set_property(state->id, "xmjd6_msime_short_request", gate.c_str());
+            if (!submitCorrectionPool(*state, state->shortCode)) return std::nullopt;
+        }
+        if (!state->correction.valid()) return std::nullopt;
         if (state->correction.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
             Snapshot pending;
             pending.correctionPending = true;
@@ -930,7 +1093,7 @@ std::optional<Snapshot> RimeRuntime::refreshCandidates(std::uint64_t session) {
         const auto current = snapshot(session, false);
         char text[16'384]{};
         const auto header = "msime2\t" + std::to_string(state->correctionEpoch) + "\t" + current.rawInput + "\n";
-        if (current.asciiMode || current.page || current.highlightedIndex ||
+        if (!correctionEligible(*state, current) ||
             state->pendingPool.compare(0, header.size(), header) != 0 ||
             !api_->get_property(state->id, "xmjd6_msime_pool", text, sizeof(text)) || state->pendingPool != text)
             return std::nullopt;
@@ -955,6 +1118,7 @@ Snapshot RimeRuntime::snapshot(std::uint64_t session, bool drainCommit) {
         state->correctionEpoch && !state->precedingText.empty()) {
         try {
             state->precedingText = correction::trailingContext(state->precedingText + result.commitText);
+            cancelShortCorrection(*state);
             state->pendingPool.clear();
             state->correction = {};
             api_->set_property(state->id, "xmjd6_msime_epoch", std::to_string(++state->correctionEpoch).c_str());

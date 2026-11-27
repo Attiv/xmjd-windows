@@ -1,6 +1,6 @@
 # 星猫键道 Windows 原生版
 
-星猫键道独立 Windows 版本，当前版本 **0.1.5+28**。采用原生 C++17 TSF 前端，提供 x64/x86 输入法 DLL，由一个 x64 Host 运行 librime。无需安装 Weasel，也不读取或修改 Weasel 的用户目录。
+星猫键道独立 Windows 版本，当前版本 **0.1.5+31**。采用原生 C++17 TSF 前端，提供 x64/x86 输入法 DLL，由一个 x64 Host 运行 librime。无需安装 Weasel，也不读取或修改 Weasel 的用户目录。
 
 ## 下载并安装
 
@@ -8,7 +8,7 @@
 
 公开安装包和 SHA-256 校验值见 [GitHub Releases](https://github.com/Attiv/xmjd-windows/releases)（无需登录）。
 
-1. 下载 `XMJD-0.1.5+28-windows-x64-setup.exe`。支持 Windows 11 x64；不支持 ARM64。
+1. 下载 `XMJD-0.1.5+31-windows-x64-setup.exe`。支持 Windows 11 x64；不支持 ARM64。
 2. 运行安装程序并允许管理员安装。程序自动安装并注册 x64/x86 输入法，无需安装开发工具或执行构建命令。
 3. 安装结束后会以普通用户身份打开**星猫键道设置**。如果窗口没有出现，从开始菜单打开“星猫键道 → 星猫键道设置”。
 4. 在设置里选择输入方案，点击**应用并部署**，等待词典编译完成；需要外部方案或换皮肤，见下面两节。
@@ -17,7 +17,7 @@
 
 安装程序目前没有商业代码签名证书。请从本仓库 Release 下载，并按附件中的 `SHA256SUMS.txt` 核对。Windows 可能显示未知发布者提示。
 
-程序目录：`%ProgramFiles%\XMJD\0.1.5+28`。用户数据独立保存在 `%LOCALAPPDATA%\XMJD`，包括 `SharedData`、`UserData`、`Staging`、`Backups`、`Logs`。正常运行使用普通用户权限；Host 不以管理员、受限令牌或 AppContainer 身份启动。
+程序目录：`%ProgramFiles%\XMJD\0.1.5+31`。用户数据独立保存在 `%LOCALAPPDATA%\XMJD`，包括 `SharedData`、`UserData`、`Staging`、`Backups`、`Logs`。正常运行使用普通用户权限；Host 不以管理员、受限令牌或 AppContainer 身份启动。
 
 ## 设置与方案选择
 
@@ -31,25 +31,22 @@
 
 运行中的输入法也可以用 **F4** 或 **Ctrl+grave** 呼出方案选单；切换后会在会话销毁时写回 `settings.ini`，新字段继续使用该方案。若刚切换方案，请切换一次窗口或重新输入，让输入法建立新会话。
 
-设置程序必须以普通用户身份运行。管理员窗口只能修改配置文件，不能启动引擎。方案列表来自程序目录 `Resources\Rime\*.schema.yaml` 和用户目录 `%LOCALAPPDATA%\XMJD\UserData\Rime`，标记“勿选”的辅助方案不会显示。
+设置程序必须以普通用户身份运行。未选择外部目录时，方案列表来自星猫自带与本地用户目录；选择外部目录后，方案列表只读所选目录。标记“勿选”的辅助方案不会显示。
 
 ## 方案来源（外部 Rime 方案目录）
 
-设置里的**方案来源**可以把已有的 Rime 方案目录（例如鼠须管目录、别人分享的方案包）接进星猫：
-
-1. 点**选择目录…**，选中根层直接包含 `.schema.yaml` 的目录。
-2. 星猫只读取并复制到自己的用户目录 `%LOCALAPPDATA%\XMJD\UserData\Rime\imported\<目录名>\`，不改动来源目录，也不写入它的 build。
-3. 复制时跳过 `build`、`*.userdb`、`user.yaml`、`installation.yaml`、`trash` 等运行时文件；只接受方案、词典、Lua、OpenCC 和图片等资源，上限 20,000 个文件 / 512 MiB。
-4. 回到方案列表选中新方案，点**应用并部署**。部署时会逐方案验证，个别第三方方案编译失败只会在 `Logs\schema-skipped.log` 里记录，不会让整个引擎不可用。
-5. **移除导入方案**会删掉 `imported` 目录，内置方案和用户词库不受影响；如果当前正在用导入的方案，会回退到星猫键道6。
-
-来源路径和导入结果写在 `settings.ini` 的 `scheme_source`；关掉再开设置程序仍然记得。
+1. 点**选择目录…**，选择根层同时包含 `default.yaml` 和 `*.schema.yaml` 的目录，例如 `F:\JD6`。不要选 `build`。
+2. 所选目录是整套 Rime 方案的来源：包括 `default.custom.yaml`、各方案的自定义补丁、词典、Lua、OpenCC 和脚本依赖的其他文件。不与内置方案或旧用户目录中的配置混用。
+3. 星猫从所选目录创建独立运行副本，编译缓存与本机的用户词库等运行数据写在 `%LOCALAPPDATA%\XMJD\UserData\ExternalRime`，不写入原目录，也不用原目录的旧 `build`。编辑原目录后，点**应用并部署**重新读取；删掉的源文件不会残留。
+4. **改回内置方案**不会删除外部目录，也不会删除星猫为该目录保存的运行数据。源路径保存在 `settings.ini` 的 `scheme_source`。
 
 ## 上下文纠错
 
 在星猫键道设置窗口底部点击 **上下文纠错…**，可开关功能、调节强度（0–100，默认 35）和领先倍数（1.0–3.0，默认 1.4），也可单独清除纠错学习记录。保存后从下一个词起生效，不用重新部署。
 
 - 仅用于兼容的键道6 方案。输入 4–6 码时，同 Mac 版的本地模型会根据光标前最多 64 字判断邻键误按或相邻两键颠倒；有充分把握才在首个合法词后加一个「〔纠错〕」候选。原候选顺序不变，不自动上屏。
+- 可选的「单字纠错（两码，实验性）」默认关闭。打开后，两码停顿约 250 ms 才开始判断；只考虑精确匹配的单个汉字，并采用比词组更严格的置信门槛。继续输入会取消旧提示；首选和顶屏规则不变。
+- 内置词库的单字示例：开启后，在普通编辑器输入「举头望明」，再误打 `gh` 并停顿，可选「月〔纠错〕」。
 - 英文、已标记为密码或隐私的输入框、不给前文的应用、系统搜索等打包应用和管理员应用继续使用普通候选。前文不上传、不写入日志，学习记录用于降低重复误报。
 - 内置词库可试「下雨了，你有没有」后输入 `dhef`，应提示「带伞〔纠错〕」。使用包含「丢魂丧胆」的 JD6 外部词库时，也可把强度调到 90 后测试 Mac 的 `dhsd` 示例。外部方案目录不会被改写。
 - 若新装 Windows 缺少 [Visual C++ v14 x64 运行库](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)，本地模型可能无法加载；普通输入仍可使用。
@@ -86,7 +83,7 @@
 新版安装器会尝试卸载旧版本再注册新版，保留用户词库和设置。安装前建议先切到其他输入法并关闭使用星猫键道的应用；若系统界面仍加载旧 DLL，注销后重新登录。若 DLL 丢失或注册不完整，请先切换到其他输入法并退出使用它的应用，再用**同版本**安装包修复。在安装包所在目录的 PowerShell 执行：
 
 ```powershell
-& '.\XMJD-0.1.5+28-windows-x64-setup.exe' /REPAIR
+& '.\XMJD-0.1.5+31-windows-x64-setup.exe' /REPAIR
 ```
 
 修复会核对现有安装的版本、固定目录和注册所有权，从安装包恢复程序文件，再重建双架构注册，保留用户数据。路径中有链接、存在未知文件、安装属于其他版本或所有权不匹配时会拒绝修复；文件仍被占用时先注销或重启再试。修复后可以重新使用或正常卸载。手动开发安装仍使用其 `scripts/unregister.ps1` 注销。不要直接删除仍在注册中的 DLL。
@@ -138,7 +135,7 @@ Windows/out/release/                  EXE 安装程序、对应源码及校验�
 单架构构建使用 `-Architecture x64` 或 `x86`；完整交付必须使用默认 `all`。已有同名输出不会覆盖。校验交付支持目录或 ZIP，也可在其他平台的 PowerShell 执行：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\build.ps1 -VerifyPackage ".\Windows\out\package\XMJD-0.1.5+28-windows-x64-x86-Release.zip"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Windows\scripts\build.ps1 -VerifyPackage ".\Windows\out\package\XMJD-0.1.5+31-windows-x64-x86-Release.zip"
 ```
 
 开发安装需要管理员的 64 位 PowerShell：

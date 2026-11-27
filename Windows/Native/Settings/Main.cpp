@@ -41,8 +41,6 @@ using Microsoft::WRL::ComPtr;
 namespace {
 constexpr std::size_t kMaxSchemaBytes = 128 * 1024;
 constexpr DWORD kDeployTimeoutMs = 10 * 60 * 1000;
-constexpr std::size_t kMaxImportFiles = 20000;
-constexpr std::uintmax_t kMaxImportBytes = 512u * 1024u * 1024u;
 
 struct SchemaInfo {
     std::string id;
@@ -311,19 +309,10 @@ void scanDirectory(const std::filesystem::path& root, bool recursive, bool fromU
 
 bool loadSchemas() {
     g_schemas.clear();
-    // 设了方案来源就以那个目录为准——引擎那边也是直接拿它当共享数据目录，
-    // 列出来的方案必须和引擎真正能编译的一致。
-    bool scannedSource = false;
     const std::string source = settingsValue("scheme_source");
     if (!source.empty()) {
-        std::error_code sourceEc;
-        const auto path = xmjd::win::widen(source);
-        if (std::filesystem::is_directory(path, sourceEc)) {
-            scanDirectory(path, false, false);
-            scannedSource = !g_schemas.empty();
-        }
-    }
-    if (!scannedSource) {
+        scanDirectory(xmjd::win::widen(source), false, true);
+    } else {
         scanDirectory(g_installDirectory / L"Resources" / L"Rime", false, false);
         scanDirectory(g_dataRoot / L"UserData" / L"Rime", true, true);
     }
@@ -338,7 +327,7 @@ bool loadSchemas() {
         const int rightRank = rank(right.id);
         return leftRank != rightRank ? leftRank < rightRank : left.id < right.id;
     });
-    return std::any_of(g_schemas.begin(), g_schemas.end(), [](const auto& schema) { return schema.id == "xmjd6"; });
+    return !g_schemas.empty();
 }
 
 std::string readSelectedSchema() {
@@ -406,12 +395,7 @@ bool replaceSchemaList(std::string& content, const std::string& selected) {
     return true;
 }
 
-bool writeConfiguration(const std::string& selected, std::wstring& error) {
-    if (!validSchemaId(selected) ||
-        std::none_of(g_schemas.begin(), g_schemas.end(), [&](const auto& schema) { return schema.id == selected; })) {
-        error = L"未知的输入方案。";
-        return false;
-    }
+bool writeBundledSchemaList(const std::string& selected, std::wstring& error) {
     const auto configPath = userConfigPath();
     std::error_code ec;
     std::filesystem::create_directories(configPath.parent_path(), ec);
@@ -444,6 +428,16 @@ bool writeConfiguration(const std::string& selected, std::wstring& error) {
         error = L"无法写入方案配置：" + configPath.wstring();
         return false;
     }
+    return true;
+}
+
+bool writeConfiguration(const std::string& selected, std::wstring& error) {
+    if (!validSchemaId(selected) ||
+        std::none_of(g_schemas.begin(), g_schemas.end(), [&](const auto& schema) { return schema.id == selected; })) {
+        error = L"未知的输入方案。";
+        return false;
+    }
+    if (settingsValue("scheme_source").empty() && !writeBundledSchemaList(selected, error)) return false;
     if (!updateSettings({{"schema", selected}})) {
         error = L"无法写入设置文件：" + settingsPath().wstring();
         return false;
@@ -620,30 +614,6 @@ bool isSubPath(const std::filesystem::path& parent, const std::filesystem::path&
            (childText[parentText.size()] == L'\\' || childText[parentText.size()] == L'/');
 }
 
-bool isRuntimeName(const std::wstring& name) {
-    static const std::vector<std::wstring> excluded = {
-        L"build", L"sync", L"trash", L"backups", L"staging", L"user.yaml", L"installation.yaml",
-        L"zzc_state", L"runtime_undo.tsv", L"runtime_undo.tsv.bak", L"typing_stats.txt",
-        L"typing_stats.txt.bak"};
-    std::wstring lowered = name;
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                   [](wchar_t character) { return static_cast<wchar_t>(towlower(character)); });
-    if (std::find(excluded.begin(), excluded.end(), lowered) != excluded.end()) return true;
-    if (lowered.find(L".userdb") != std::wstring::npos) return true;
-    if (lowered == L"zzc") return true;
-    return false;
-}
-
-bool importableExtension(const std::filesystem::path& path) {
-    std::wstring extension = path.extension().wstring();
-    std::transform(extension.begin(), extension.end(), extension.begin(),
-                   [](wchar_t character) { return static_cast<wchar_t>(towlower(character)); });
-    static const std::vector<std::wstring> allowed = {
-        L".yaml", L".yml", L".lua", L".json", L".ocd", L".ocd2", L".txt", L".tsv", L".gram",
-        L".png", L".pdf", L".tif", L".tiff", L".ico"};
-    return std::find(allowed.begin(), allowed.end(), extension) != allowed.end();
-}
-
 std::wstring sanitizeFolderName(std::wstring name) {
     for (auto& character : name) {
         if (character == L'\\' || character == L'/' || character == L':' || character == L'*' ||
@@ -658,101 +628,31 @@ std::wstring sanitizeFolderName(std::wstring name) {
     return name;
 }
 
-bool importSchemeDirectory(const std::filesystem::path& source, std::wstring& error, std::size_t& schemas) {
+bool setSchemeSource(const std::filesystem::path& source, std::wstring& error, std::size_t& schemas) {
     schemas = 0;
     std::error_code ec;
-    if (!std::filesystem::is_directory(source, ec) || ec) {
-        error = L"请选择一个目录。";
-        return false;
-    }
-    const auto resolved = std::filesystem::weakly_canonical(source, ec);
-    if (ec) {
-        error = L"无法读取所选目录。";
+    const auto resolved = std::filesystem::canonical(source, ec);
+    if (ec || !std::filesystem::is_regular_file(resolved / L"default.yaml", ec)) {
+        error = L"请选择根层包含 default.yaml 和 *.schema.yaml 的 Rime 目录，而不是 build 子目录。";
         return false;
     }
     const auto owned = std::filesystem::weakly_canonical(g_dataRoot, ec);
-    if (ec) {
-        error = L"无法解析用户数据目录。";
+    if (ec || isSubPath(owned, resolved) || isSubPath(resolved, owned)) {
+        error = L"方案来源必须和星猫的运行目录分开。";
         return false;
     }
-    if (isSubPath(owned, resolved) || isSubPath(resolved, owned)) {
-        error = L"方案来源不能是星猫的运行目录，也不能是它的上级目录。请选择独立的 Rime 方案目录。";
-        return false;
-    }
-    bool hasSchema = false;
     for (std::filesystem::directory_iterator it(resolved, ec), end; it != end && !ec; it.increment(ec)) {
-        if (it->is_regular_file(ec) && endsWithSchemaYaml(it->path().filename().wstring())) {
-            hasSchema = true;
-            break;
-        }
+        if (it->is_regular_file(ec) && endsWithSchemaYaml(it->path().filename().wstring())) ++schemas;
+        if (ec) break;
     }
-    if (!hasSchema) {
-        error = L"所选目录的根层没有 .schema.yaml。请选择方案文件所在的目录。";
+    if (ec || !schemas) {
+        error = L"无法读取所选目录，或根层没有 .schema.yaml。";
         return false;
     }
-
-    const auto destination = importedSchemesPath() / sanitizeFolderName(resolved.filename().wstring());
-    if (std::filesystem::exists(destination, ec)) {
-        std::filesystem::remove_all(destination, ec);
-        if (ec) {
-            error = L"无法清理上次导入的方案：" + destination.wstring();
-            return false;
-        }
-    }
-    std::filesystem::create_directories(destination, ec);
-    if (ec) {
-        error = L"无法创建导入目录：" + destination.wstring();
+    if (!updateSettings({{"scheme_source", xmjd::win::narrow(resolved.wstring())}})) {
+        error = L"无法保存方案来源。";
         return false;
     }
-    std::size_t files = 0;
-    std::uintmax_t bytes = 0;
-    for (std::filesystem::recursive_directory_iterator it(
-             resolved, std::filesystem::directory_options::skip_permission_denied, ec), end;
-         it != end && !ec; it.increment(ec)) {
-        std::error_code itemEc;
-        if (it->is_symlink(itemEc)) continue;
-        const auto name = it->path().filename().wstring();
-        const bool directory = it->is_directory(itemEc);
-        if (isRuntimeName(name)) {
-            if (directory) it.disable_recursion_pending();
-            continue;
-        }
-        if (directory) continue;
-        if (!it->is_regular_file(itemEc) || itemEc) continue;
-        if (!importableExtension(it->path())) continue;
-        const auto size = it->file_size(itemEc);
-        if (itemEc) continue;
-        if (++files > kMaxImportFiles || bytes + size > kMaxImportBytes) {
-            std::filesystem::remove_all(destination, ec);
-            error = L"方案目录过大（上限 20,000 个文件 / 512 MiB）。请不要选择整个用户目录。";
-            return false;
-        }
-        bytes += size;
-        const auto relative = std::filesystem::relative(it->path(), resolved, ec);
-        if (ec) continue;
-        const auto target = destination / relative;
-        std::filesystem::create_directories(target.parent_path(), ec);
-        if (ec) continue;
-        std::filesystem::copy_file(it->path(), target, std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) {
-            std::filesystem::remove_all(destination, ec);
-            error = L"复制方案文件失败：" + relative.wstring();
-            return false;
-        }
-        if (endsWithSchemaYaml(name)) ++schemas;
-    }
-    if (ec) {
-        std::filesystem::remove_all(destination, ec);
-        error = L"读取方案目录失败。请检查权限后重试。";
-        return false;
-    }
-    if (schemas == 0) {
-        std::filesystem::remove_all(destination, ec);
-        error = L"没有找到可用的方案文件。";
-        return false;
-    }
-    updateSettings({{"scheme_source", xmjd::win::narrow(resolved.wstring())}});
-    appendLog(L"import scheme source=" + resolved.wstring() + L" schemas=" + std::to_wstring(schemas));
     return true;
 }
 
@@ -767,15 +667,10 @@ bool removeImportedSchemes(std::wstring& error) {
             return false;
         }
     }
-    loadSchemas();
-    // A removed scheme cannot stay selected: fall back to the bundled one and
-    // rewrite schema_list so the next deploy does not reference a missing file.
-    const std::string selected = readSelectedSchema();
-    if (!selected.empty() &&
-        std::none_of(g_schemas.begin(), g_schemas.end(), [&](const auto& schema) { return schema.id == selected; })) {
-        if (!writeConfiguration("xmjd6", error)) return false;
+    if (!updateSettings({{"scheme_source", ""}, {"schema", "xmjd6"}})) {
+        error = L"无法清除方案来源设置。";
+        return false;
     }
-    updateSettings({{"scheme_source", ""}});
     appendLog(L"remove imported schemes");
     return true;
 }
@@ -1271,33 +1166,21 @@ void chooseSchemeSource() {
     if (g_busy) return;
     const auto folder = pickFolder(L"选择 Rime 方案目录（根层要有 default.yaml 和 *.schema.yaml）");
     if (!folder) return;
-    std::error_code ec;
-    const auto resolved = std::filesystem::weakly_canonical(*folder, ec);
-    if (ec || !std::filesystem::is_directory(resolved, ec)) {
-        showError(L"无法读取所选目录。");
-        return;
-    }
-    if (!std::filesystem::is_regular_file(resolved / L"default.yaml", ec)) {
-        showError(L"这个目录根层没有 default.yaml。\n\n请选 Rime 里放 *.schema.yaml 的那一层"
-                  L"（鼠须管/小狼毫的用户目录，不是 build 子目录）。");
-        return;
-    }
+    const auto oldSource = settingsValue("scheme_source");
     std::size_t schemas = 0;
-    for (std::filesystem::directory_iterator it(resolved, ec), end; it != end && !ec; it.increment(ec)) {
-        if (it->is_regular_file(ec) && endsWithSchemaYaml(it->path().filename().wstring())) ++schemas;
-    }
-    if (schemas == 0) {
-        showError(L"这个目录里没有 .schema.yaml，选错了？");
+    std::wstring error;
+    if (!setSchemeSource(*folder, error, schemas)) {
+        showError(error);
         return;
     }
-    updateSettings({{"scheme_source", xmjd::win::narrow(resolved.wstring())}});
+    const auto resolved = xmjd::win::widen(settingsValue("scheme_source"));
     loadSchemas();
     refreshSchemaList(-1);
     refreshSourceLabel();
     // Rime 的 shared_data_dir 只在初始化时生效，必须重启引擎才会真的换目录。
     std::wstring stopped;
     const bool restarted = restartHostForSourceChange(stopped);
-    appendLog(L"scheme source = " + resolved.wstring() + L"，方案 " + std::to_wstring(schemas));
+    appendLog(L"scheme source = " + resolved + L"，方案 " + std::to_wstring(schemas));
     if (!restarted) {
         MessageBoxW(g_dialog,
                     (L"方案来源已记录，但引擎没重启成功：" + stopped +
@@ -1309,19 +1192,19 @@ void chooseSchemeSource() {
     startHost();
     std::wstring health;
     if (!waitForHealth(150000, health)) {
-        updateSettings({{"scheme_source", ""}});
+        updateSettings({{"scheme_source", oldSource}});
         std::wstring ignored;
         restartHostForSourceChange(ignored);
         loadSchemas();
         refreshSchemaList(-1);
         refreshSourceLabel();
-        appendLog(L"scheme source rejected: " + resolved.wstring());
-        showError(L"这个目录编译失败，已自动回退到内置方案。\n\n" + health +
+        appendLog(L"scheme source rejected: " + resolved);
+        showError(L"这个目录编译失败，已恢复上一个方案来源。\n\n" + health +
                   L"\n\n常见原因：目录里缺 default.yaml 依赖的词典、或方案本身有语法错误。");
         return;
     }
     MessageBoxW(g_dialog,
-                (L"方案来源已设为：\n" + resolved.wstring() + L"\n\n读到 " + std::to_wstring(schemas) +
+                (L"方案来源已设为：\n" + resolved + L"\n\n读到 " + std::to_wstring(schemas) +
                  L" 个方案，引擎已按这个目录编译完成。"
                  L"\n\n以后这个目录里改词典，重新部署一次就生效；星猫只读，不往里面写文件。")
                     .c_str(),
@@ -1349,7 +1232,10 @@ void removeSchemeSource() {
                     L"星猫键道设置", MB_YESNO | MB_ICONQUESTION) != IDYES) {
         return;
     }
-    updateSettings({{"scheme_source", ""}});
+    if (!updateSettings({{"scheme_source", ""}, {"schema", "xmjd6"}})) {
+        showError(L"无法保存内置方案设置。");
+        return;
+    }
     std::wstring stopped;
     const bool restarted = restartHostForSourceChange(stopped);
     std::error_code cleanEc;
@@ -1669,10 +1555,12 @@ INT_PTR CALLBACK correctionProc(HWND dialog, UINT message, WPARAM wParam, LPARAM
         const BOOL on = IsDlgButtonChecked(dialog, IDC_CORRECTION_ENABLED) == BST_CHECKED;
         EnableWindow(GetDlgItem(dialog, IDC_CORRECTION_STRENGTH), on);
         EnableWindow(GetDlgItem(dialog, IDC_CORRECTION_LEAD), on);
+        EnableWindow(GetDlgItem(dialog, IDC_CORRECTION_SINGLE_CHARACTER), on);
     };
     if (message == WM_INITDIALOG) {
         const auto prefs = xmjd::loadCorrectionPreferences(g_dataRoot);
         CheckDlgButton(dialog, IDC_CORRECTION_ENABLED, prefs.enabled ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dialog, IDC_CORRECTION_SINGLE_CHARACTER, prefs.singleCharacter ? BST_CHECKED : BST_UNCHECKED);
         SetDlgItemInt(dialog, IDC_CORRECTION_STRENGTH, prefs.strength, FALSE);
         SendDlgItemMessageW(dialog, IDC_CORRECTION_STRENGTH, EM_SETLIMITTEXT, 3, 0);
         for (int v = 10; v <= 30; ++v) {
@@ -1710,6 +1598,7 @@ INT_PTR CALLBACK correctionProc(HWND dialog, UINT message, WPARAM wParam, LPARAM
         }
         auto prefs = xmjd::loadCorrectionPreferences(g_dataRoot);
         prefs.enabled = IsDlgButtonChecked(dialog, IDC_CORRECTION_ENABLED) == BST_CHECKED;
+        prefs.singleCharacter = IsDlgButtonChecked(dialog, IDC_CORRECTION_SINGLE_CHARACTER) == BST_CHECKED;
         prefs.strength = static_cast<int>(strength);
         prefs.leadTenths = static_cast<int>(lead) + 10;
         if (!xmjd::saveCorrectionPreferences(g_dataRoot, prefs)) {
@@ -1795,6 +1684,7 @@ INT_PTR CALLBACK settingsProc(HWND dialog, UINT message, WPARAM wParam, LPARAM l
                 GetDlgItem(correctionDialog, IDC_CORRECTION_ENABLED) &&
                 GetDlgItem(correctionDialog, IDC_CORRECTION_STRENGTH) &&
                 GetDlgItem(correctionDialog, IDC_CORRECTION_RESET) &&
+                GetDlgItem(correctionDialog, IDC_CORRECTION_SINGLE_CHARACTER) &&
                 SendDlgItemMessageW(correctionDialog, IDC_CORRECTION_LEAD, CB_GETCOUNT, 0, 0) == 21;
             if (correctionDialog) DestroyWindow(correctionDialog);
             if (!correctionControls) {
@@ -1938,7 +1828,7 @@ INT_PTR CALLBACK settingsProc(HWND dialog, UINT message, WPARAM wParam, LPARAM l
 int runCheck() {
     if (!loadSchemas()) return 2;
     const std::string selected = readSelectedSchema();
-    if (!selected.empty() &&
+    if (settingsValue("scheme_source").empty() && !selected.empty() &&
         std::none_of(g_schemas.begin(), g_schemas.end(), [&](const auto& schema) { return schema.id == selected; })) {
         return 3;
     }
@@ -1971,7 +1861,7 @@ int runSelectStyle(const std::string& id) {
 int runImportScheme(const std::filesystem::path& source) {
     std::wstring error;
     std::size_t schemas = 0;
-    if (!importSchemeDirectory(source, error, schemas)) {
+    if (!setSchemeSource(source, error, schemas)) {
         std::fwprintf(stderr, L"import failed: %ls\n", error.c_str());
         return 3;
     }

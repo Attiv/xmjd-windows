@@ -51,9 +51,13 @@ private:
         std::string precedingText;
         std::string pendingPool;
         std::future<std::string> correction;
+        bool singleCharacter = false;
+        std::string shortCode;
+        ULONGLONG shortReadyAt = 0;
     };
 
     bool loadLibrary(int& errorCode);
+    void stopRime() noexcept;
     bool publishResources(bool explicitDeploy, bool& pendingInitialDeploy, int& errorCode);
     bool recoverResourceJournal(bool& pendingInitialDeploy, int& errorCode);
     bool validateSchemas(int& errorCode);
@@ -64,21 +68,26 @@ private:
     std::filesystem::path settingsPath() const;
     std::string readSettingsValue(std::string_view key) const;
     std::string readSettingsSchema() const;
-    bool resolveSchemeSource(const std::filesystem::path& bundled, std::filesystem::path& resolved) const;
+    bool resolveSchemeSource(std::string_view configured, std::filesystem::path& resolved) const;
     bool writeSettingsSchema(const std::string& schema);
     bool loadSelectedSchema();
     void rememberSessionSchema(RimeSessionId session);
     bool probeUpToDate() const;
     void writeEngineProbe();
     void prepareCorrection() noexcept;
+    bool correctionEligible(const Session&, const Snapshot&) const noexcept;
+    void cancelShortCorrection(Session&) noexcept;
     void queueCorrection(Session&, Snapshot&) noexcept;
+    bool submitCorrectionPool(Session&, std::string_view rawInput);
 
     std::filesystem::path executableDirectory_;
     std::filesystem::path rootDirectory_;
     std::filesystem::path sharedDirectory_;
     std::filesystem::path userDirectory_;
     std::filesystem::path stagingDirectory_;
+    std::filesystem::path compiledDirectory_;
     std::filesystem::path backupDirectory_;
+    bool usingExternalSource_ = false;
     std::string sharedDirectoryUtf8_;
     std::string userDirectoryUtf8_;
     std::string stagingDirectoryUtf8_;

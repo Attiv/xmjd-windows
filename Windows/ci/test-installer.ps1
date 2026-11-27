@@ -147,10 +147,11 @@ Remove-Item -LiteralPath $schemeFixture -Recurse -Force -ErrorAction SilentlyCon
 New-Item -ItemType Directory -Force -Path $schemeFixture | Out-Null
 [IO.File]::WriteAllText((Join-Path $schemeFixture 'ci_test.schema.yaml'),
     "schema:`n  schema_id: ci_test`n  name: CI $(ConvertFrom-Json '"\u6d4b\u8bd5\u65b9\u6848"')`n")
+[IO.File]::WriteAllText((Join-Path $schemeFixture 'default.yaml'), "schema_list:`n  - schema: ci_test`n")
 $importScheme = Start-Process -FilePath $settingsExe -ArgumentList ('--import-scheme "' + $schemeFixture + '"') -Wait -PassThru -RedirectStandardOutput (Join-Path $logRoot 'import-scheme.txt')
 if ($importScheme.ExitCode -ne 0) { throw "Settings scheme import failed: $($importScheme.ExitCode)" }
 $importedSchema = Join-Path $settingsRoot 'UserData/Rime/imported/ci-scheme-source/ci_test.schema.yaml'
-if (-not (Test-Path -LiteralPath $importedSchema -PathType Leaf)) { throw 'The imported schema was not copied into user data.' }
+if (Test-Path -LiteralPath $importedSchema) { throw 'Settings must not create a filtered copy of the selected source.' }
 if (-not (Select-String -LiteralPath (Join-Path $settingsRoot 'settings.ini') -Pattern '^scheme_source=' -Quiet)) {
     throw 'Settings did not record the external schema source.'
 }
@@ -160,11 +161,15 @@ if ($schemaList.ExitCode -ne 0) { throw "Settings schema listing failed: $($sche
 $schemaText = [IO.File]::ReadAllText($schemaListFile, [Text.Encoding]::UTF8)
 if ($schemaText -notmatch 'schema ci_test ') { throw 'The imported schema is missing from the schema list.' }
 if ($schemaText -notmatch '(?m)^schema ci_test .* imported\r?$') { throw 'The schema list does not mark the schema as imported.' }
+if ($schemaText -match '(?m)^schema xmjd6 ') { throw 'The external source was mixed with the built-in scheme list.' }
 $settingsCheckAfterImport = Start-Process -FilePath $settingsExe -ArgumentList '--check' -Wait -PassThru
 if ($settingsCheckAfterImport.ExitCode -ne 0) { throw "Settings self-check after import failed: $($settingsCheckAfterImport.ExitCode)" }
 $removeSchemes = Start-Process -FilePath $settingsExe -ArgumentList '--remove-schemes' -Wait -PassThru
 if ($removeSchemes.ExitCode -ne 0) { throw "Removing imported schemes failed: $($removeSchemes.ExitCode)" }
 if (Test-Path -LiteralPath (Join-Path $settingsRoot 'UserData/Rime/imported')) { throw 'The imported data directory survived removal.' }
+if (-not (Test-Path -LiteralPath (Join-Path $schemeFixture 'ci_test.schema.yaml') -PathType Leaf)) {
+    throw 'Removing the source selection modified the external scheme.'
+}
 Write-Output 'PASS: scheme import, listing, self-check and removal.'
 Invoke-CheckedProcess $powerShell ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $installRoot 'scripts/register.ps1') + '" -InstallDirectory "' + $installRoot + '"')
 Assert-Registration $true

@@ -6,6 +6,7 @@
 namespace xmjd {
 struct CorrectionPreferences {
     bool enabled = true;
+    bool singleCharacter = false;
     int strength = 35;
     int leadTenths = 14;
     std::uint64_t learningReset = 0;

@@ -133,7 +133,8 @@ std::string format(float v) {
 } // namespace
 
 bool validCode(std::string_view code) noexcept {
-    return code.size() >= 4 && code.size() <= 6 && code.find_first_not_of("abcdefghijklmnopqrstuvwxyz") == code.npos;
+    return (code.size() == 2 || (code.size() >= 4 && code.size() <= 6)) &&
+           code.find_first_not_of("abcdefghijklmnopqrstuvwxyz") == code.npos;
 }
 
 std::string trailingContext(std::string_view text) {
@@ -253,8 +254,10 @@ struct Worker::Impl {
         for (std::size_t i = 1; i < lines.size(); ++i) {
             const auto fields = split(lines[i], '\t');
             if (fields.size() != 3 || (fields[0] != "L" && fields[0] != "C") ||
-                (i == 1 && fields[0] != "L") || !validCode(fields[2])) return {};
+                (i == 1 && fields[0] != "L") || fields[2].size() != head[2].size() ||
+                !validCode(fields[2])) return {};
             auto codes = scalars(fields[1]);
+            if (head[2].size() == 2 && codes.size() != 1) return {};
             std::vector<int32_t> body;
             for (auto c : codes) {
                 if (c < 0x20 || (c >= 0x7f && c <= 0x9f)) return {};

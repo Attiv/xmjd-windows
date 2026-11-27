@@ -34,6 +34,7 @@ CorrectionPreferences loadCorrectionPreferences(const std::filesystem::path& dat
         if (separator != line.npos) {
             const auto key = line.substr(0, separator), value = line.substr(separator + 1);
             if (key == "enabled") out.enabled = parse(value, 1) != 0;
+            else if (key == "single_character") out.singleCharacter = parse(value, 0) == 1;
             else if (key == "strength") out.strength = static_cast<int>(std::min<std::uint64_t>(100, parse(value, 35)));
             else if (key == "lead_tenths") out.leadTenths = static_cast<int>(std::clamp<std::uint64_t>(parse(value, 14), 10, 30));
             else if (key == "learning_reset") out.learningReset = parse(value, 0);
@@ -53,7 +54,8 @@ bool saveCorrectionPreferences(const std::filesystem::path& dataRoot, Correction
     auto temporary = target;
     temporary += L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
     std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
-    file << "enabled=" << p.enabled << "\nstrength=" << std::clamp(p.strength, 0, 100)
+    file << "enabled=" << p.enabled << "\nsingle_character=" << p.singleCharacter
+         << "\nstrength=" << std::clamp(p.strength, 0, 100)
          << "\nlead_tenths=" << std::clamp(p.leadTenths, 10, 30)
          << "\nlearning_reset=" << p.learningReset << '\n';
     file.close();
